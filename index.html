@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neptune Vision | Jeremie JR Odimba</title>
+    <!-- Framework CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Polices Google -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Three.js pour effets 3D -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- GSAP pour animations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.11.4/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.11.4/ScrollTrigger.min.js"></script>
+    
+    <style>
+        :root {
+            --primary: #0066FF;
+            --dark: #0A0A0A;
+            --light: #F5F5F7;
+            --neon: #00F0FF;
+        }
+        
+        /* Effets texte */
+        .gradient-text {
+            background: linear-gradient(90deg, var(--primary), var(--neon));
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        
+        /* Effets 3D Apple-like */
+        .hero-image {
+            transform-style: preserve-3d;
+            transform: perspective(1000px) rotateX(5deg);
+            transition: transform 0.5s cubic-bezier(0.25, 0.1, 0.25, 1);
+        }
+        
+        /* Timeline CV */
+        .timeline-item {
+            border-left: 3px solid var(--primary);
+            transition: all 0.3s;
+            padding-left: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .timeline-item:hover {
+            transform: translateX(10px);
+        }
+        
+        /* Bouton CTA */
+        .cta-btn {
+            background: linear-gradient(90deg, var(--primary), var(--neon));
+            transition: all 0.3s;
+        }
+        .cta-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(0, 240, 255, 0.3);
+        }
+        
+        /* Mobile Optimization */
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2.5rem !important;
+            }
+            .hero p {
+                font-size: 1rem !important;
+            }
+            audio {
+                width: 100% !important;
+            }
+        }
+    </style>
+</head>
+<body class="antialiased bg-black text-gray-100 font-['Inter']">
+    <!-- ===== NAVIGATION ===== -->
+    <nav class="fixed w-full z-50 bg-black bg-opacity-80 backdrop-blur-md">
+        <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="text-2xl font-bold gradient-text">Neptune Vision</div>
+            <div class="hidden md:flex space-x-8">
+                <a href="#about" class="text-white hover:text-cyan-400 transition duration-300">À propos</a>
+                <a href="#portfolio" class="text-white hover:text-cyan-400 transition duration-300">Portfolio</a>
+                <a href="#vision" class="text-white hover:text-cyan-400 transition duration-300">Vision</a>
+                <a href="#audio" class="text-white hover:text-cyan-400 transition duration-300">Audio</a>
+                <a href="#contact" class="text-white hover:text-cyan-400 transition duration-300">Contact</a>
+            </div>
+            <button class="md:hidden text-white" id="mobile-menu-btn">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
+        </div>
+        
+        <!-- Menu mobile -->
+        <div class="md:hidden hidden bg-black py-4 px-6" id="mobile-menu">
+            <a href="#about" class="block py-2 text-white">À propos</a>
+            <a href="#portfolio" class="block py-2 text-white">Portfolio</a>
+            <a href="#vision" class="block py-2 text-white">Vision</a>
+            <a href="#audio" class="block py-2 text-white">Audio</a>
+            <a href="#contact" class="block py-2 text-white">Contact</a>
+        </div>
+    </nav>
+
+    <!-- ===== HERO SECTION ===== -->
+    <section class="min-h-screen relative flex items-center justify-center overflow-hidden bg-gradient-to-b from-black to-gray-900">
+        <!-- Canvas Three.js pour particules -->
+        <div id="particles-js" class="absolute inset-0 z-0"></div>
+        
+        <div class="text-center px-6 z-10 relative">
+            <div class="mb-12 animate-pulse">
+                <svg class="w-32 h-32 mx-auto" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+                    <path fill="#0066FF" d="M45,-78.2C58.1,-71.3,68.6,-58.5,76.1,-44.2C83.6,-29.9,88.1,-14,88.4,0.2C88.7,14.4,84.8,28.8,76.2,40.6C67.6,52.4,54.3,61.6,39.5,69.5C24.7,77.4,8.3,83.9,-7.3,83.9C-22.9,83.9,-45.8,77.3,-60.5,65.3C-75.3,53.3,-81.9,35.8,-85.5,17.3C-89.1,-1.2,-89.7,-20.7,-81.5,-36.6C-73.3,-52.5,-56.3,-64.8,-40.1,-70.7C-23.9,-76.6,-8.5,-76.1,6.3,-74.5C21,-72.9,42,-70.2,45,-78.2Z" transform="translate(100 100)" />
+                </svg>
+            </div>
+            <h1 class="text-5xl md:text-7xl font-bold mb-6 text-white">La créativité, c'est mon langage.</h1>
+            <p class="text-xl md:text-2xl mb-8 max-w-2xl mx-auto text-gray-300">Designer visuel spécialisé en identité de marque et médias sociaux</p>
+            <a href="#about" class="cta-btn inline-block px-8 py-4 rounded-full text-white font-semibold">
+                🎨 Découvrir mon travail
+            </a>
+        </div>
+    </section>
+
+    <!-- ===== ABOUT SECTION ===== -->
+    <section id="about" class="py-20 px-6 bg-black">
+        <div class="max-w-6xl mx-auto grid md:grid-cols-2 gap-16 items-center">
+            <div class="relative">
+                <div class="absolute inset-0 bg-gradient-to-br from-blue-600 to-cyan-500 rounded-3xl opacity-20 blur-3xl"></div>
+                <!-- VOTRE PHOTO -->
+                <img src="20250318_175517.jpg" 
+                     alt="Jeremie JR Odimba" 
+                     class="relative z-10 w-full h-auto rounded-3xl shadow-2xl border-4 border-opacity-20 border-cyan-500">
+            </div>
+            <div>
+                <h2 class="text-4xl font-bold mb-8 gradient-text">À propos de moi</h2>
+                <p class="text-xl mb-8 text-gray-300">
+                    Je m'appelle Jeremie JR Odimba, designer graphique basé à Lubumbashi. Passionné par le storytelling visuel, je crée des identités mémorables et des designs percutants pour les marques ambitieuses.
+                </p>
+                <div class="space-y-4 mb-8">
+                    <div class="flex items-center">
+                        <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center mr-4">
+                            ✏️
+                        </div>
+                        <span>Spécialisé en branding et médias sociaux</span>
+                    </div>
+                    <div class="flex items-center">
+                        <div class="w-8 h-8 bg-cyan-500 rounded-full flex items-center justify-center mr-4">
+                            🎨
+                        </div>
+                        <span>Expert Adobe Creative Suite & Figma</span>
+                    </div>
+                </div>
+                <blockquote class="text-2xl italic border-l-4 border-cyan-500 pl-6 py-2 text-white">
+                    "J'inspire par l'image, je construis par la vision."
+                </blockquote>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== PORTFOLIO SECTION ===== -->
+    <section id="portfolio" class="py-20 px-6 bg-gray-900">
+        <div class="max-w-6xl mx-auto">
+            <h2 class="text-4xl font-bold mb-12 text-center gradient-text">Mes Réalisations</h2>
+            
+            <!-- Filtres -->
+            <div class="flex flex-wrap justify-center gap-4 mb-12">
+                <button class="filter-btn px-6 py-2 rounded-full bg-cyan-600 text-white" data-filter="all">Tous</button>
+                <button class="filter-btn px-6 py-2 rounded-full bg-gray-800 text-white hover:bg-gray-700" data-filter="flyers">Flyers</button>
+                <button class="filter-btn px-6 py-2 rounded-full bg-gray-800 text-white hover:bg-gray-700" data-filter="logos">Logos</button>
+                <button class="filter-btn px-6 py-2 rounded-full bg-gray-800 text-white hover:bg-gray-700" data-filter="affiches">Affiches</button>
+            </div>
+            
+            <!-- Galerie -->
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <!-- Projet 1 -->
+                <div class="project-card" data-category="flyers">
+                    <div class="bg-gray-800 rounded-2xl overflow-hidden shadow-xl transition-all duration-300 hover:scale-105">
+                        <img src="https://images.unsplash.com/photo-1589998059171-988d887df646?ixlib=rb-1.2.1&auto=format&fit=crop&w=1350&q=80" 
+                             alt="Flyer Événementiel" 
+                             class="w-full h-64 object-cover">
+                        <div class="p-6">
+                            <h3 class="text-xl font-bold mb-2 text-white">Flyer Concert</h3>
+                            <p class="text-gray-400 mb-4">Design moderne pour événement musical</p>
+                            <div class="flex flex-wrap gap-2">
+                                <span class="text-xs px-3 py-1 bg-gray-700 rounded-full text-cyan-400">Photoshop</span>
+                                <span class="text-xs px-3 py-1 bg-gray-700 rounded-full text-cyan-400">Illustrator</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Projet 2 -->
+                <div class="project-card" data-category="logos">
+                    <div class="bg-gray-800 rounded-2xl overflow-hidden shadow-xl transition-all duration-300 hover:scale-105">
+                        <img src="https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?ixlib=rb-1.2.1&auto=format&fit=crop&w=1350&q=80" 
+                             alt="Logo Entreprise" 
+                             class="w-full h-64 object-cover">
+                        <div class="p-6">
+                            <h3 class="text-xl font-bold mb-2 text-white">Logo Startup</h3>
+                            <p class="text-gray-400 mb-4">Identité visuelle minimaliste</p>
+                            <div class="flex flex-wrap gap-2">
+                                <span class="text-xs px-3 py-1 bg-gray-700 rounded-full text-cyan-400">Illustrator</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Projet 3 -->
+                <div class="project-card" data-category="affiches">
+                    <div class="bg-gray-800 rounded-2xl overflow-hidden shadow-xl transition-all duration-300 hover:scale-105">
+                        <img src="https://images.unsplash.com/photo-1551288049-bebda4e38f71?ixlib=rb-1.2.1&auto=format&fit=crop&w=1350&q=80" 
+                             alt="Affiche Culturelle" 
+                             class="w-full h-64 object-cover">
+                        <div class="p-6">
+                            <h3 class="text-xl font-bold mb-2 text-white">Affiche Culturelle</h3>
+                            <p class="text-gray-400 mb-4">Design pour exposition d'art contemporain</p>
+                            <div class="flex flex-wrap gap-2">
+                                <span class="text-xs px-3 py-1 bg-gray-700 rounded-full text-cyan-400">InDesign</span>
+                                <span class="text-xs px-3 py-1 bg-gray-700 rounded-full text-cyan-400">Photoshop</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== VISION SECTION ===== -->
+    <section id="vision" class="py-20 px-6 bg-black">
+        <div class="max-w-4xl mx-auto text-center">
+            <h2 class="text-4xl font-bold mb-12 gradient-text">Ma Philosophie Créative</h2>
+            
+            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
+                <div class="bg-gray-900 bg-opacity-70 p-8 rounded-2xl backdrop-blur-sm border border-gray-800">
+                    <div class="text-4xl mb-4 text-cyan-500">✨</div>
+                    <h3 class="text-xl font-bold mb-2 text-white">Créativité</h3>
+                    <p class="text-gray-400">Chaque projet est une œuvre unique, pensée pour se démarquer.</p>
+                </div>
+                
+                <div class="bg-gray-900 bg-opacity-70 p-8 rounded-2xl backdrop-blur-sm border border-gray-800">
+                    <div class="text-4xl mb-4 text-cyan-500">⚡</div>
+                    <h3 class="text-xl font-bold mb-2 text-white">Innovation</h3>
+                    <p class="text-gray-400">Je combine tendances actuelles et approches novatrices.</p>
+                </div>
+                
+                <div class="bg-gray-900 bg-opacity-70 p-8 rounded-2xl backdrop-blur-sm border border-gray-800">
+                    <div class="text-4xl mb-4 text-cyan-500">🎯</div>
+                    <h3 class="text-xl font-bold mb-2 text-white">Précision</h3>
+                    <p class="text-gray-400">Un pixel-perfect pour des résultats impeccables.</p>
+                </div>
+                
+                <div class="bg-gray-900 bg-opacity-70 p-8 rounded-2xl backdrop-blur-sm border border-gray-800">
+                    <div class="text-4xl mb-4 text-cyan-500">🤝</div>
+                    <h3 class="text-xl font-bold mb-2 text-white">Collaboration</h3>
+                    <p class="text-gray-400">Votre vision + mon expertise = résultat exceptionnel.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== AUDIO SECTION ===== -->
+    <section id="audio" class="py-20 px-6 bg-gray-900">
+        <div class="max-w-4xl mx-auto">
+            <h2 class="text-4xl font-bold mb-12 text-center gradient-text">Espace Audio</h2>
+            
+            <div class="bg-gray-800 rounded-2xl overflow-hidden shadow-2xl">
+                <!-- Audio 1 -->
+                <div class="p-6 border-b border-gray-700">
+                    <h3 class="text-xl font-bold mb-2 text-white">Le Destin de JR</h3>
+                    <p class="text-gray-400 mb-4">Réflexions sur le destin et la vision personnelle</p>
+                    <audio controls class="w-full mt-4">
+                        <source src="Le_Destin_de_JR.mp3" type="audio/mpeg">
+                        Votre navigateur ne supporte pas l'audio.
+                    </audio>
+                </div>
+                
+                <!-- Audio 2 -->
+                <div class="p-6">
+                    <h3 class="text-xl font-bold mb-2 text-white">Jeremy</h3>
+                    <p class="text-gray-400 mb-4">Pensées sur la créativité et la foi</p>
+                    <audio controls class="w-full mt-4">
+                        <source src="Jeremy.mp3" type="audio/mpeg">
+                        Votre navigateur ne supporte pas l'audio.
+                    </audio>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== CONTACT SECTION ===== -->
+    <section id="contact" class="py-20 px-6 bg-black">
+        <div class="max-w-4xl mx-auto">
+            <h2 class="text-4xl font-bold mb-12 text-center gradient-text">Travaillons Ensemble</h2>
+            
+            <div class="grid md:grid-cols-2 gap-12">
+                <!-- Formulaire -->
+                <div class="bg-gray-900 p-8 rounded-2xl shadow-xl border border-gray-800">
+                    <form action="https://formspree.io/f/myyqzkqj" method="POST">
+                        <div class="mb-6">
+                            <label class="block text-gray-400 mb-2">Votre nom</label>
+                            <input type="text" name="name" required 
+                                   class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 text-white">
+                        </div>
+                        <div class="mb-6">
+                            <label class="block text-gray-400 mb-2">Votre email</label>
+                            <input type="email" name="_replyto" required
+                                   class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 text-white">
+                        </div>
+                        <div class="mb-6">
+                            <label class="block text-gray-400 mb-2">Votre message</label>
+                            <textarea name="message" rows="4" required
+                                      class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-cyan-500 text-white"></textarea>
+                        </div>
+                        <button type="submit" class="cta-btn w-full py-3 rounded-lg text-white font-semibold">
+                            Envoyer le message
+                        </button>
+                    </form>
+                </div>
+                
+                <!-- Coordonnées -->
+                <div>
+                    <div class="bg-gray-900 p-8 rounded-2xl shadow-xl border border-gray-800 mb-8">
+                        <h3 class="text-2xl font-bold mb-6 text-white">Contact Direct</h3>
+                        <div class="space-y-4">
+                            <div class="flex items-start">
+                                <div class="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center mr-4 mt-1">
+                                    📞
+                                </div>
+                                <div>
+                                    <p class="text-gray-400">Téléphone</p>
+                                    <p class="text-white">+243 974 336 700</p>
+                                </div>
+                            </div>
+                            <div class="flex items-start">
+                                <div class="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center mr-4 mt-1">
+                                    📧
+                                </div>
+                                <div>
+                                    <p class="text-gray-400">Email</p>
+                                    <p class="text-white">jeremyodimba322@gmail.com</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-gray-900 p-8 rounded-2xl shadow-xl border border-gray-800">
+                        <h3 class="text-2xl font-bold mb-6 text-white">Réseaux Sociaux</h3>
+                        <div class="flex space-x-4">
+                            <a href="#" class="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center hover:bg-cyan-500 transition">
+                                <span class="text-xl">📱</span>
+                            </a>
+                            <a href="#" class="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center hover:bg-cyan-500 transition">
+                                <span class="text-xl">🎵</span>
+                            </a>
+                            <a href="#" class="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center hover:bg-cyan-500 transition">
+                                <span class="text-xl">📹</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== FOOTER ===== -->
+    <footer class="py-12 px-6 bg-gray-900 text-center">
+        <div class="max-w-4xl mx-auto">
+            <div class="text-2xl font-bold mb-4 gradient-text">Neptune Vision</div>
+            <p class="text-gray-400 mb-6">"La créativité est l'intelligence qui s'amuse." - Albert Einstein</p>
+            <p class="text-gray-500 text-sm">© 2023 Jeremie JR Odimba. Tous droits réservés.</p>
+        </div>
+    </footer>
+
+    <!-- ===== SCRIPTS ===== -->
+    <script>
+        // === THREE.JS PARTICULES ===
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ 
+            alpha: true,
+            antialias: true
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('particles-js').appendChild(renderer.domElement);
+
+        // Création des particules
+        const particlesGeometry = new THREE.BufferGeometry();
+        const particlesCount = 2000;
+        
+        const posArray = new Float32Array(particlesCount * 3);
+        for(let i = 0; i < particlesCount * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 10;
+        }
+        
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const particlesMaterial = new THREE.PointsMaterial({
+            size: 0.015,
+            color: 0x0066ff,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+        
+        const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+        scene.add(particlesMesh);
+        camera.position.z = 3;
+
+        // Animation
+        function animate() {
+            requestAnimationFrame(animate);
+            particlesMesh.rotation.x += 0.0005;
+            particlesMesh.rotation.y += 0.0005;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // === FILTRES PORTFOLIO ===
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                // Active le bouton
+                document.querySelectorAll('.filter-btn').forEach(b => {
+                    b.classList.remove('bg-cyan-600');
+                    b.classList.add('bg-gray-800');
+                });
+                this.classList.add('bg-cyan-600');
+                this.classList.remove('bg-gray-800');
+                
+                // Filtre les projets
+                const filter = this.dataset.filter;
+                document.querySelectorAll('.project-card').forEach(card => {
+                    if(filter === 'all' || card.dataset.category === filter) {
+                        card.style.display = 'block';
+                        gsap.from(card, {
+                            opacity: 0,
+                            y: 20,
+                            duration: 0.5
+                        });
+                    } else {
+                        card.style.display = 'none';
+                    }
+                });
+            });
+        });
+
+        // === ANIMATIONS GSAP ===
+        gsap.registerPlugin(ScrollTrigger);
+        
+        // Animation des sections
+        gsap.utils.toArray('section').forEach(section => {
+            gsap.from(section, {
+                scrollTrigger: {
+                    trigger: section,
+                    start: "top 80%",
+                    toggleActions: "play none none none"
+                },
+                opacity: 0,
+                y: 50,
+                duration: 1
+            });
+        });
+
+        // Animation spécifique hero
+        gsap.from('.hero h1', {
+            opacity: 0,
+            y: 50,
+            duration: 1,
+            delay: 0.3
+        });
+        gsap.from('.hero p', {
+            opacity: 0,
+            y: 50,
+            duration: 1,
+            delay: 0.6
+        });
+        gsap.from('.cta-btn', {
+            opacity: 0,
+            y: 50,
+            duration: 1,
+            delay: 0.9
+        });
+
+        // === MENU MOBILE ===
+        document.getElementById('mobile-menu-btn').addEventListener('click', function() {
+            const menu = document.getElementById('mobile-menu');
+            menu.classList.toggle('hidden');
+            
+            if(menu.classList.contains('hidden')) {
+                gsap.to(menu, {
+                    opacity: 0,
+                    height: 0,
+                    duration: 0.3
+                });
+            } else {
+                gsap.from(menu, {
+                    opacity: 0,
+                    height: 0,
+                    duration: 0.3
+                });
+            }
+        });
+
+        // Redimensionnement
+        window.addEventListener('resize', function() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
