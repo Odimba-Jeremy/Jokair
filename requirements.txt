@@ -11,4 +11,4 @@ gunicorn==21.2.0
 redis==5.0.1
 requests==2.31.0
 qrcode==7.4.2
-Pillow==10.1.0
+Pillow
