@@ -400,7 +400,7 @@ def get_user_map(role: str = None) -> dict:
         if role:
             query = query.eq("role", role)
         rows = query.execute().data or []
-        return {row["id"]: row for row in rows}
+        return {str(row["id"]): row for row in rows}
     except Exception:
         return {}
 
@@ -1693,7 +1693,7 @@ def flag_pregnancy_from_nurse():
 def dispatch_patient():
     data = fast_json()
     patient_id = to_int(data.get("patient_id"))
-    doctor_id = to_int(data.get("doctor_id"))
+    doctor_id = data.get("doctor_id")
     box_id = data.get("box_id")
     if not patient_id or not doctor_id:
         return jsonify({"error": "Patient et medecin requis"}), 422
@@ -1701,7 +1701,7 @@ def dispatch_patient():
     if not latest_vitals.data:
         return jsonify({"error": "Les signes vitaux doivent etre preleves avant le dispatch"}), 422
     doctors = get_user_map()
-    doctor = doctors.get(doctor_id)
+    doctor = doctors.get(str(doctor_id))
     current_queue = supabase.table("patient_queue").select("assigned_doctor_id").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
     previous_doctor_id = data.get("previous_doctor_id")
     if not previous_doctor_id and current_queue:
