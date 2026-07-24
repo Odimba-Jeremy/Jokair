@@ -6,7 +6,6 @@ import re
 import secrets
 import time
 import gzip
-import threading
 from datetime import datetime, timezone, date, timedelta
 from functools import wraps
 from typing import Any
@@ -441,16 +440,109 @@ def create_service_invoice(patient_id: int, description: str, amount: float, sou
         return None
     item = {"code": source.upper(), "description": description, "quantity": 1, "unit_price": amount, "amount": amount, "date": now_iso()}
     invoice = {
-        "invoice_number": f"AUTO-{int(time.time())}-{secrets.token_hex(2).upper()}", "patient_id": patient_id,
-        "amount": amount, "description": description, "status": "unpaid", "line_items": [item], "items": [item],
-        "source": source, "source_id": source_id, "created_by": g.current_user.get("id"),
-        "created_by_name": g.current_user.get("name"), "created_at": now_iso(), "updated_at": now_iso()
+        "invoice_number": f"AUTO-{int(time.time())}-{secrets.token_hex(2).upper()}",
+        "patient_id": patient_id,
+        "amount": amount,
+        "description": description,
+        "status": "unpaid",
+        "line_items": [item],
+        "items": [item],
+        "source": source,
+        "source_id": source_id,
+        "created_by": g.current_user.get("id"),
+        "created_by_name": g.current_user.get("name"),
+        "created_at": now_iso(),
+        "updated_at": now_iso()
     }
     result = compatible_insert(TABLES["billing"], invoice)
     created = result.data[0] if result.data else invoice
     if account_line and created.get("id"):
         compatible_update("patient_account_lines", {"status": "invoiced", "invoice_id": created["id"], "updated_at": now_iso()}, "id", account_line.get("id"))
     return created
+
+# ==================== FACTURATION AUTOMATIQUE ====================
+def get_current_rate():
+    """Récupère le taux de change actuel depuis la base"""
+    try:
+        result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(1).execute()
+        if result.data:
+            return float(result.data[0].get("rate", 2800))
+    except Exception:
+        pass
+    return 2800
+
+def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
+    """Génère une facture automatiquement depuis la base de données"""
+    # Récupérer le tarif depuis la base
+    try:
+        tarif_result = supabase.table(TABLES["tariffs"]).select("*").eq("code", code_tarif).eq("is_active", True).execute()
+        if not tarif_result.data:
+            # Essayer de trouver par catégorie/label
+            tarif_result = supabase.table(TABLES["tariffs"]).select("*").eq("category", code_tarif).eq("is_active", True).execute()
+            if not tarif_result.data:
+                print(f"Tarif non trouvé pour le code: {code_tarif}")
+                return None
+        tarif = tarif_result.data[0]
+    except Exception as e:
+        print(f"Erreur récupération tarif: {e}")
+        return None
+    
+    taux = get_current_rate()
+    prix_usd = to_float(tarif.get("price_usd", 0)) * quantite
+    prix_cdf = prix_usd * taux
+    
+    if prix_cdf <= 0:
+        return None
+    
+    facture = {
+        "invoice_number": f"AUTO-{int(time.time())}-{secrets.token_hex(2).upper()}",
+        "patient_id": patient_id,
+        "amount": prix_cdf,
+        "amount_usd": prix_usd,
+        "description": tarif.get("label", code_tarif),
+        "status": "unpaid",
+        "source": source or code_tarif,
+        "source_id": source_id,
+        "items": [{
+            "code": code_tarif,
+            "description": tarif.get("label", code_tarif),
+            "quantity": quantite,
+            "unit_price_usd": tarif.get("price_usd", 0),
+            "unit_price_cdf": tarif.get("price_usd", 0) * taux,
+            "amount_usd": prix_usd,
+            "amount_cdf": prix_cdf
+        }],
+        "created_by": g.current_user.get("id") if hasattr(g, "current_user") else None,
+        "created_by_name": g.current_user.get("name") if hasattr(g, "current_user") else "Systeme",
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    
+    result = compatible_insert(TABLES["billing"], facture)
+    invoice = result.data[0] if result.data else facture
+    
+    # Ajouter au compte patient
+    add_patient_account_line(
+        patient_id, 
+        "auto", 
+        tarif.get("label", code_tarif), 
+        prix_cdf, 
+        source or code_tarif, 
+        source_id
+    )
+    
+    return invoice
+
+def get_tarif_code_for_care(care_type):
+    """Retourne le code tarifaire pour un type de soin"""
+    mapping = {
+        "Pansement": "SOIN_PANSEMENT",
+        "Injection": "SOIN_INJECTION",
+        "Perfusion": "SOIN_PERFUSION",
+        "Suture": "SOIN_SUTURE",
+        "Plâtre": "SOIN_PLATRE",
+    }
+    return mapping.get(care_type, "SOIN_BASE")
 
 # ==================== GENERATE BARCODE ====================
 def generate_barcode_svg(patient_id: int, patient_name: str) -> str:
@@ -663,7 +755,7 @@ def update_patient(patient_id: int):
         return jsonify({"error": "Acces patient non autorise"}), 403
     allowed_fields = ["full_name", "phone", "email", "date_of_birth", "gender", "blood_type",
                       "address", "status", "allergies", "medical_history", "emergency_contact",
-                      "insurance", "priority", "doctor_notes", "room_number"]
+                      "insurance", "priority", "doctor_notes", "room_number", "is_pregnant"]
     updates = {k: v for k, v in data.items() if k in allowed_fields and v is not None}
     updates["updated_at"] = now_iso()
     result = supabase.table(TABLES["patients"]).update(updates).eq("id", patient_id).execute()
@@ -755,35 +847,6 @@ def regenerate_patient_barcode(patient_id: int):
     
     return Response(svg, mimetype='image/svg+xml')
 
-# ==================== PATIENT QR CODE ====================
-@app.route("/api/patients/<int:patient_id>/qr", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_patient_qr(patient_id: int):
-    """Génère un code QR pour la fiche patient"""
-    try:
-        import qrcode
-        from io import BytesIO
-    except ImportError:
-        return jsonify({"error": "Bibliothèque QR Code non installée"}), 500
-    
-    patient = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
-    if not patient.data:
-        return jsonify({"error": "Patient introuvable"}), 404
-    
-    patient_data = patient.data[0]
-    url = f"https://jokair.onrender.com/fiche.html?id={patient_id}"
-    
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(url)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="#0a5c7e", back_color="white")
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    
-    return send_file(buffer, mimetype="image/png")
-
 # ==================== APPOINTMENTS ====================
 @app.route("/api/appointments", methods=["GET"])
 @roles_required(*ROLES["staff"])
@@ -823,7 +886,7 @@ def create_appointment():
         "type": data.get("type"),
         "duration": to_int(data.get("duration"), 30),
         "notes": data.get("notes", ""),
-        "status": normalize_status(data.get("status", "scheduled"), ["scheduled", "completed", "cancelled"], "scheduled"),
+        "status": normalize_status(data.get("status", "scheduled"), ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled"),
         "priority": normalize_status(data.get("priority", "normal"), ["normal", "urgent"], "normal"),
         "doctor_id": g.current_user["id"],
         "doctor_name": g.current_user["name"],
@@ -850,7 +913,7 @@ def update_appointment(appointment_id: int):
     allowed = ["date", "type", "duration", "status", "priority", "notes"]
     updates = {k: v for k, v in data.items() if k in allowed and v is not None}
     if "status" in updates:
-        updates["status"] = normalize_status(updates["status"], ["scheduled", "completed", "cancelled"], "scheduled")
+        updates["status"] = normalize_status(updates["status"], ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled")
     updates["updated_at"] = now_iso()
     result = supabase.table(TABLES["appointments"]).update(updates).eq("id", appointment_id).execute()
     if not result.data:
@@ -866,7 +929,7 @@ def patch_appointment(appointment_id: int):
     allowed = ["status", "date", "type", "duration", "priority", "notes"]
     updates = {k: v for k, v in data.items() if k in allowed and v is not None}
     if "status" in updates:
-        updates["status"] = normalize_status(updates["status"], ["scheduled", "completed", "cancelled"], "scheduled")
+        updates["status"] = normalize_status(updates["status"], ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled")
     if not updates:
         return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
     updates["updated_at"] = now_iso()
@@ -1235,7 +1298,56 @@ def create_lab_prelevement():
     invalidate_cache()
     return jsonify(result.data[0]), 201
 
-# ==================== CARE LOGS ====================
+# ==================== LABORATORY PARAMS ====================
+LAB_PARAMS = {
+    "Hémogramme": [
+        {"name": "GB", "label": "Globules blancs", "unit": "G/L", "ref_min": 4.0, "ref_max": 10.0, "decimal": 1},
+        {"name": "GR", "label": "Globules rouges", "unit": "T/L", "ref_min": 4.2, "ref_max": 5.8, "decimal": 2},
+        {"name": "Hb", "label": "Hémoglobine", "unit": "g/dL", "ref_min": 12.0, "ref_max": 16.0, "decimal": 1},
+        {"name": "Ht", "label": "Hématocrite", "unit": "%", "ref_min": 37, "ref_max": 47, "decimal": 0},
+        {"name": "VGM", "label": "VGM", "unit": "fL", "ref_min": 80, "ref_max": 96, "decimal": 0},
+        {"name": "TCMH", "label": "TCMH", "unit": "pg", "ref_min": 27, "ref_max": 32, "decimal": 1},
+        {"name": "CCMH", "label": "CCMH", "unit": "g/dL", "ref_min": 32, "ref_max": 36, "decimal": 1},
+        {"name": "Plaquettes", "label": "Plaquettes", "unit": "G/L", "ref_min": 150, "ref_max": 400, "decimal": 0}
+    ],
+    "Bilan hépatique": [
+        {"name": "ALAT", "label": "ALAT", "unit": "U/L", "ref_min": 5, "ref_max": 45, "decimal": 0},
+        {"name": "ASAT", "label": "ASAT", "unit": "U/L", "ref_min": 5, "ref_max": 40, "decimal": 0},
+        {"name": "GGT", "label": "Gamma-GT", "unit": "U/L", "ref_min": 5, "ref_max": 50, "decimal": 0},
+        {"name": "PAL", "label": "Phosphatases alcalines", "unit": "U/L", "ref_min": 30, "ref_max": 120, "decimal": 0},
+        {"name": "Bilirubine_T", "label": "Bilirubine totale", "unit": "mg/dL", "ref_min": 0.2, "ref_max": 1.2, "decimal": 1},
+        {"name": "Bilirubine_D", "label": "Bilirubine directe", "unit": "mg/dL", "ref_min": 0, "ref_max": 0.3, "decimal": 1}
+    ],
+    "Bilan rénal": [
+        {"name": "Uree", "label": "Urée", "unit": "g/L", "ref_min": 0.2, "ref_max": 0.5, "decimal": 2},
+        {"name": "Creatinine", "label": "Créatinine", "unit": "mg/L", "ref_min": 6, "ref_max": 13, "decimal": 1},
+        {"name": "Acide_urique", "label": "Acide urique", "unit": "mg/L", "ref_min": 25, "ref_max": 80, "decimal": 1}
+    ],
+    "Bilan lipidique": [
+        {"name": "Cholest_total", "label": "Cholestérol total", "unit": "g/L", "ref_min": 1.4, "ref_max": 2.5, "decimal": 2},
+        {"name": "Triglycerides", "label": "Triglycérides", "unit": "g/L", "ref_min": 0.4, "ref_max": 1.8, "decimal": 2},
+        {"name": "HDL", "label": "HDL-Cholestérol", "unit": "g/L", "ref_min": 0.4, "ref_max": 0.7, "decimal": 2},
+        {"name": "LDL", "label": "LDL-Cholestérol", "unit": "g/L", "ref_min": 0.6, "ref_max": 1.6, "decimal": 2}
+    ],
+    "Analyse d'urine": [
+        {"name": "pH", "label": "pH", "unit": "", "ref_min": 4.5, "ref_max": 8.0, "decimal": 1},
+        {"name": "Densite", "label": "Densité", "unit": "", "ref_min": 1.005, "ref_max": 1.030, "decimal": 3},
+        {"name": "Proteines", "label": "Protéines", "unit": "g/L", "ref_min": 0, "ref_max": 0.15, "decimal": 2},
+        {"name": "Glucose", "label": "Glucose", "unit": "mmol/L", "ref_min": 0, "ref_max": 0.8, "decimal": 1},
+        {"name": "Cetones", "label": "Cétones", "unit": "", "ref_min": None, "ref_max": None, "decimal": 0},
+        {"name": "Nitrites", "label": "Nitrites", "unit": "", "ref_min": None, "ref_max": None, "decimal": 0},
+        {"name": "Leucocytes", "label": "Leucocytes", "unit": "/µL", "ref_min": 0, "ref_max": 5, "decimal": 0},
+        {"name": "Hematies", "label": "Hématies", "unit": "/µL", "ref_min": 0, "ref_max": 3, "decimal": 0}
+    ]
+}
+
+@app.route("/api/laboratory/params/<string:test_type>", methods=["GET"])
+@roles_required("super_admin", "laboratoire")
+def get_lab_params(test_type: str):
+    """Récupère les paramètres pour un type d'examen"""
+    return jsonify(LAB_PARAMS.get(test_type, []))
+
+# ==================== CARE LOGS (AVEC FACTURATION AUTO) ====================
 @app.route("/api/care", methods=["GET"])
 @roles_required(*ROLES["staff"])
 @cached(60)
@@ -1254,9 +1366,13 @@ def create_care_log():
     data = fast_json()
     if not data.get("patient_id") or not data.get("care_type"):
         return jsonify({"error": "Patient et type de soin requis"}), 422
+    
+    patient_id = to_int(data.get("patient_id"))
+    care_type = data.get("care_type")
+    
     care = {
-        "patient_id": to_int(data.get("patient_id")),
-        "care_type": data.get("care_type"),
+        "patient_id": patient_id,
+        "care_type": care_type,
         "description": data.get("description", ""),
         "priority": normalize_status(data.get("priority", "normal"), ["normal", "urgent", "high", "low"], "normal"),
         "status": data.get("status", "pending"),
@@ -1267,9 +1383,15 @@ def create_care_log():
         "updated_at": now_iso()
     }
     result = compatible_insert(TABLES["care"], care)
-    add_audit("CREATE", "care", f"Soin #{result.data[0]['id']}", result.data[0]["id"])
+    created_care = result.data[0] if result.data else care
+    
+    # Facturation automatique du soin
+    tarif_code = get_tarif_code_for_care(care_type)
+    facture_auto(patient_id, tarif_code, 1, "care", created_care.get("id"))
+    
+    add_audit("CREATE", "care", f"Soin #{created_care.get('id')}", created_care.get("id"))
     invalidate_cache()
-    return jsonify(result.data[0]), 201
+    return jsonify(created_care), 201
 
 @app.route("/api/care/<int:care_id>", methods=["PUT"])
 @roles_required("super_admin", "docteur", "infirmier")
@@ -1414,6 +1536,10 @@ def workflow_vitals():
     patient_id = to_int(data.get("patient_id"))
     if not patient_id:
         return jsonify({"error": "Patient requis"}), 422
+    
+    # Vérifier si la case "Femme enceinte" est cochée
+    is_pregnant = data.get("is_pregnant", False)
+    
     payload = {
         "patient_id": patient_id,
         "temperature": data.get("temperature"),
@@ -1430,6 +1556,32 @@ def workflow_vitals():
         "updated_at": now_iso()
     }
     result = compatible_insert("vital_signs", payload)
+    
+    # Si la case enceinte est cochée, mettre à jour le patient
+    if is_pregnant:
+        patient = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
+        if patient.data and is_female(patient.data[0]):
+            supabase.table(TABLES["patients"]).update({
+                "is_pregnant": True,
+                "updated_at": now_iso()
+            }).eq("id", patient_id).execute()
+            
+            # Vérifier si une grossesse existe déjà
+            existing = supabase.table("pregnancies").select("*").eq("patient_id", patient_id).eq("status", "active").execute()
+            if not existing.data:
+                compatible_insert("pregnancies", {
+                    "patient_id": patient_id,
+                    "last_menstrual_period": None,
+                    "expected_delivery_date": None,
+                    "risk_level": "normal",
+                    "medical_history": "Grossesse signalée par l'infirmier lors des signes vitaux",
+                    "status": "active",
+                    "created_by": g.current_user["id"],
+                    "created_by_name": g.current_user["name"],
+                    "created_at": now_iso(),
+                    "updated_at": now_iso()
+                })
+    
     supabase.table("patient_queue").update({"status": "vitals_done", "updated_at": now_iso()}).eq("patient_id", patient_id).in_("status", ["waiting", "vitals_done"]).execute()
     add_audit("CREATE", "vital_signs", f"Signes vitaux patient #{patient_id}", patient_id)
     invalidate_cache()
@@ -1490,20 +1642,6 @@ def dispatch_patient():
     doctor_id = to_int(data.get("doctor_id"))
     if not patient_id or not doctor_id:
         return jsonify({"error": "Patient et medecin requis"}), 422
-    
-    # 🔍 VÉRIFICATION : Le médecin est-il déjà dans un box occupé ?
-    if doctor_id:
-        existing_doctor_box = supabase.table("medical_boxes").select("*")\
-            .eq("doctor_id", doctor_id)\
-            .eq("status", "occupied")\
-            .execute()
-        
-        if existing_doctor_box.data:
-            box_number = existing_doctor_box.data[0].get("box_number")
-            return jsonify({
-                "error": f"Ce médecin est déjà en consultation dans le Box {box_number}"
-            }), 422
-    
     latest_vitals = supabase.table("vital_signs").select("id").eq("patient_id", patient_id).limit(1).execute()
     if not latest_vitals.data:
         return jsonify({"error": "Les signes vitaux doivent etre preleves avant le dispatch"}), 422
@@ -1594,23 +1732,14 @@ def workflow_consultations():
     current_patient = supabase.table(TABLES["patients"]).select("status").eq("id", patient_id).execute().data or []
     if not current_patient or current_patient[0].get("status") not in ("admitted", "discharged"):
         supabase.table(TABLES["patients"]).update({"status": "active", "updated_at": now_iso()}).eq("id", patient_id).execute()
+    
+    # Facturation automatique avec grille tarifaire
     consultation_invoice = None
     if consultation_fee > 0:
-        invoice = {
-            "invoice_number": f"CONS-{int(time.time())}-{secrets.token_hex(2).upper()}",
-            "patient_id": patient_id,
-            "amount": round(consultation_fee, 2),
-            "description": "Consultation médicale",
-            "status": "unpaid",
-            "line_items": [{"code": "CONSULTATION", "description": "Consultation médicale", "quantity": 1, "unit_price": round(consultation_fee, 2), "amount": round(consultation_fee, 2), "date": now_iso()}],
-            "items": [{"code": "CONSULTATION", "description": "Consultation médicale", "quantity": 1, "unit_price": round(consultation_fee, 2), "amount": round(consultation_fee, 2), "date": now_iso()}],
-            "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
-            "created_at": now_iso(), "updated_at": now_iso()
-        }
-        invoice_result = compatible_insert(TABLES["billing"], invoice)
-        consultation_invoice = invoice_result.data[0] if invoice_result.data else invoice
-        if consultation_line and consultation_invoice.get("id"):
+        consultation_invoice = facture_auto(patient_id, "CONSULT", 1, "consultation", result.data[0].get("id"))
+        if consultation_line and consultation_invoice and consultation_invoice.get("id"):
             compatible_update("patient_account_lines", {"status": "invoiced", "invoice_id": consultation_invoice["id"], "updated_at": now_iso()}, "id", consultation_line.get("id"))
+    
     add_audit("CREATE", "consultation", f"Consultation patient #{patient_id}", patient_id)
     invalidate_cache()
     response = dict(result.data[0])
@@ -1738,12 +1867,29 @@ def discharge_workflow_hospitalization(hosp_id: int):
     daily_rate = to_float(data.get("daily_rate"), row.get("daily_rate") or 0)
     updates = {"discharge_date": discharge_date, "status": "discharged", "days_count": days, "daily_rate": daily_rate, "updated_at": now_iso()}
     result = supabase.table("hospitalizations").update(updates).eq("id", hosp_id).execute()
+    
+    # Facturation automatique de l'hospitalisation
     if daily_rate > 0:
-        add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s)", days * daily_rate, "hospitalization", hosp_id, days, daily_rate)
+        amount = days * daily_rate
+        add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s)", amount, "hospitalization", hosp_id, days, daily_rate)
+        facture_auto(to_int(row.get("patient_id")), "HOSPI_JOUR", days, "hospitalization", hosp_id)
+    
     supabase.table(TABLES["patients"]).update({"status": "discharged", "updated_at": now_iso()}).eq("id", row.get("patient_id")).execute()
     add_audit("UPDATE", "hospitalization", f"Sortie hospitalisation #{hosp_id}", hosp_id)
     invalidate_cache()
     return jsonify(result.data[0] if result.data else updates)
+
+@app.route("/api/workflow/hospitalizations/patient/<int:patient_id>/discharge", methods=["POST"])
+@roles_required("super_admin", "infirmier", "docteur")
+def discharge_patient_hospitalization_by_id(patient_id: int):
+    """Sortie d'hospitalisation par ID patient (trouve automatiquement l'hospitalisation en cours)"""
+    # Trouver l'hospitalisation en cours pour ce patient
+    hosp = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).eq("status", "hospitalized").execute()
+    if not hosp.data:
+        return jsonify({"error": "Aucune hospitalisation en cours pour ce patient"}), 404
+    
+    hosp_id = hosp.data[0]["id"]
+    return discharge_workflow_hospitalization(hosp_id)
 
 @app.route("/api/workflow/followups", methods=["GET", "POST"])
 @roles_required("super_admin", "docteur", "infirmier")
@@ -1973,367 +2119,94 @@ def workflow_tariff_history():
     rows = supabase.table(TABLES["tariff_history"]).select("*").order("created_at", desc=True).execute().data or []
     return jsonify(rows)
 
-# ==================== MEDICAL BOXES ====================
-@app.route("/api/medical/boxes", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_medical_boxes():
-    try:
-        result = supabase.table("medical_boxes").select("*").order("box_number").execute()
-        return jsonify(result.data or [])
-    except Exception:
-        return jsonify([])
-
-@app.route("/api/medical/boxes", methods=["POST"])
-@roles_required("super_admin")  # SEUL ADMIN peut créer
-def create_medical_box():
+# ==================== HOSPITALIZATION FOLLOWUPS ====================
+@app.route("/api/workflow/hospitalization-followups", methods=["GET", "POST"])
+@roles_required("super_admin", "infirmier", "docteur")
+def workflow_hospitalization_followups():
+    """Gestion des suivis d'hospitalisation"""
+    if request.method == "GET":
+        patient_id = request.args.get("patient_id")
+        query = supabase.table("hospitalization_followups").select("*")
+        if patient_id:
+            query = query.eq("patient_id", to_int(patient_id))
+        rows = query.order("created_at", desc=True).execute().data or []
+        patients = get_patient_map()
+        for row in rows:
+            row["patient_name"] = patients.get(row.get("patient_id"), "Inconnu")
+        return jsonify(rows)
+    
+    # POST
     data = fast_json()
-    if not data.get("box_number"):
-        return jsonify({"error": "Numéro de box requis"}), 422
-    
-    box = {
-        "box_number": data.get("box_number"),
-        "status": "free",
-        "doctor_id": None,
-        "doctor_name": None,
-        "patient_id": None,
-        "patient_name": None,
-        "occupied_at": None,
-        "created_by": g.current_user.get("id"),
-        "created_by_name": g.current_user.get("name") or g.current_user.get("email"),
-        "created_at": now_iso(),
-        "updated_at": now_iso()
-    }
-    result = compatible_insert("medical_boxes", box)
-    add_audit("CREATE", "medical_box", f"Box: {data['box_number']}", result.data[0]["id"] if result.data else None)
-    invalidate_cache()
-    return jsonify(result.data[0] if result.data else box), 201
-
-@app.route("/api/medical/boxes/<int:box_id>", methods=["PUT"])
-@roles_required("super_admin")  # SEUL ADMIN peut modifier
-def update_medical_box(box_id: int):
-    data = fast_json()
-    allowed = ["box_number", "status", "doctor_id", "doctor_name", "patient_id", "patient_name", "occupied_at"]
-    updates = {k: v for k, v in data.items() if k in allowed and v is not None}
-    updates["updated_at"] = now_iso()
-    
-    result = supabase.table("medical_boxes").update(updates).eq("id", box_id).execute()
-    if not result.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    add_audit("UPDATE", "medical_box", f"Box #{box_id} modifié", box_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-@app.route("/api/medical/boxes/<int:box_id>", methods=["DELETE"])
-@roles_required("super_admin")  # SEUL ADMIN peut supprimer
-def delete_medical_box(box_id: int):
-    result = supabase.table("medical_boxes").select("box_number").eq("id", box_id).execute()
-    if not result.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    supabase.table("medical_boxes").delete().eq("id", box_id).execute()
-    add_audit("DELETE", "medical_box", f"Box: {result.data[0]['box_number']}", box_id)
-    invalidate_cache()
-    return jsonify({"message": "Box supprimé"})
-
-@app.route("/api/medical/boxes/<int:box_id>/free", methods=["PUT"])
-@roles_required("super_admin", "infirmier")  # Infirmier peut libérer
-def free_medical_box(box_id: int):
-    updates = {
-        "status": "free",
-        "doctor_id": None,
-        "doctor_name": None,
-        "patient_id": None,
-        "patient_name": None,
-        "occupied_at": None,
-        "updated_at": now_iso()
-    }
-    result = supabase.table("medical_boxes").update(updates).eq("id", box_id).execute()
-    if not result.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    add_audit("UPDATE", "medical_box", f"Box #{box_id} libéré", box_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-@app.route("/api/medical/boxes/<int:box_id>/assign", methods=["PUT"])
-@roles_required("super_admin", "infirmier")  # Infirmier peut assigner
-def assign_medical_box(box_id: int):
-    data = fast_json()
-    doctor_id = data.get("doctor_id")
-    patient_id = data.get("patient_id")
-    
-    if not doctor_id and not patient_id:
-        return jsonify({"error": "Médecin ou patient requis"}), 422
-    
-    # 🔍 VÉRIFICATION : Le médecin est-il déjà dans un box occupé ?
-    if doctor_id:
-        existing_doctor_box = supabase.table("medical_boxes").select("*")\
-            .eq("doctor_id", doctor_id)\
-            .eq("status", "occupied")\
-            .execute()
-        
-        if existing_doctor_box.data:
-            box_number = existing_doctor_box.data[0].get("box_number")
-            return jsonify({
-                "error": f"Ce médecin est déjà dans le Box {box_number}"
-            }), 422
-    
-    # 🔍 VÉRIFICATION : Le box est-il déjà occupé ?
-    box = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
-    if not box.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    if box.data[0].get("status") == "occupied":
-        return jsonify({"error": "Ce box est déjà occupé"}), 422
-    
-    updates = {
-        "status": "occupied",
-        "updated_at": now_iso()
-    }
-    
-    if doctor_id:
-        doctor = supabase.table(TABLES["users"]).select("name").eq("id", doctor_id).execute()
-        if doctor.data:
-            updates["doctor_name"] = doctor.data[0].get("name")
-        updates["doctor_id"] = doctor_id
-    
-    if patient_id:
-        patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", patient_id).execute()
-        if patient.data:
-            updates["patient_name"] = patient.data[0].get("full_name")
-        updates["patient_id"] = patient_id
-        updates["occupied_at"] = now_iso()
-    
-    result = supabase.table("medical_boxes").update(updates).eq("id", box_id).execute()
-    if not result.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    if patient_id:
-        supabase.table("patient_queue").update({
-            "status": "assigned",
-            "assigned_doctor_id": doctor_id,
-            "assigned_doctor_name": updates.get("doctor_name"),
-            "updated_at": now_iso()
-        }).eq("patient_id", patient_id).in_("status", ["waiting", "vitals_done", "assigned"]).execute()
-    
-    add_audit("UPDATE", "medical_box", f"Box #{box_id} assigné", box_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-@app.route("/api/medical/boxes/<int:box_id>/occupy", methods=["PUT"])
-@roles_required("super_admin", "infirmier")  # Infirmier peut occuper
-def occupy_medical_box(box_id: int):
-    data = fast_json()
-    patient_id = data.get("patient_id")
-    doctor_id = data.get("doctor_id")
-    
+    patient_id = to_int(data.get("patient_id"))
     if not patient_id:
         return jsonify({"error": "Patient requis"}), 422
     
-    # 🔍 VÉRIFICATION : Le médecin est-il déjà dans un box occupé ?
-    if doctor_id:
-        existing_doctor_box = supabase.table("medical_boxes").select("*")\
-            .eq("doctor_id", doctor_id)\
-            .eq("status", "occupied")\
-            .execute()
-        
-        if existing_doctor_box.data:
-            box_number = existing_doctor_box.data[0].get("box_number")
-            return jsonify({
-                "error": f"Ce médecin est déjà dans le Box {box_number}"
-            }), 422
-    
-    # 🔍 VÉRIFICATION : Le box est-il déjà occupé ?
-    box = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
-    if not box.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    if box.data[0].get("status") == "occupied":
-        return jsonify({"error": "Ce box est déjà occupé"}), 422
-    
-    updates = {
-        "status": "occupied",
+    payload = {
         "patient_id": patient_id,
-        "occupied_at": now_iso(),
-        "updated_at": now_iso()
-    }
-    
-    if doctor_id:
-        doctor = supabase.table(TABLES["users"]).select("name").eq("id", doctor_id).execute()
-        if doctor.data:
-            updates["doctor_name"] = doctor.data[0].get("name")
-        updates["doctor_id"] = doctor_id
-    
-    patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", patient_id).execute()
-    if patient.data:
-        updates["patient_name"] = patient.data[0].get("full_name")
-    
-    result = supabase.table("medical_boxes").update(updates).eq("id", box_id).execute()
-    if not result.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    supabase.table("patient_queue").update({
-        "status": "assigned",
-        "assigned_doctor_id": doctor_id,
-        "assigned_doctor_name": updates.get("doctor_name"),
-        "updated_at": now_iso()
-    }).eq("patient_id", patient_id).in_("status", ["waiting", "vitals_done", "assigned"]).execute()
-    
-    add_audit("UPDATE", "medical_box", f"Box #{box_id} occupé", box_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-# ==================== WORKFLOW COMPLET ====================
-@app.route("/api/workflow/consultation/start/<int:patient_id>", methods=["PUT"])
-@roles_required("super_admin", "docteur")
-def start_consultation(patient_id: int):
-    queue = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).eq("status", "assigned").execute()
-    if not queue.data:
-        return jsonify({"error": "Patient non trouvé ou non dispatché"}), 404
-    
-    result = supabase.table("patient_queue").update({
-        "status": "in_consultation",
-        "updated_at": now_iso()
-    }).eq("patient_id", patient_id).execute()
-    
-    add_audit("UPDATE", "patient_queue", f"Consultation démarrée pour patient #{patient_id}", patient_id)
-    invalidate_cache()
-    return jsonify({"message": "Consultation démarrée", "patient_id": patient_id})
-
-@app.route("/api/workflow/consultation/end/<int:patient_id>", methods=["POST"])
-@roles_required("super_admin", "docteur")
-def end_consultation(patient_id: int):
-    data = fast_json()
-    
-    consultation = {
-        "patient_id": patient_id,
-        "symptoms": data.get("symptoms", ""),
-        "diagnosis": data.get("diagnosis", ""),
-        "diagnostics": data.get("diagnostics", []),
-        "observations": data.get("observations", ""),
-        "medical_history": data.get("medical_history", ""),
-        "doctor_id": g.current_user["id"],
-        "doctor_name": g.current_user["name"],
+        "temperature": data.get("temperature"),
+        "blood_pressure_sys": data.get("blood_pressure_sys"),
+        "blood_pressure_dia": data.get("blood_pressure_dia"),
+        "heart_rate": data.get("heart_rate"),
+        "respiratory_rate": data.get("respiratory_rate"),
+        "pain_level": data.get("pain_level"),
+        "general_state": data.get("general_state", "good"),
+        "notes": data.get("notes", ""),
+        "nurse_id": g.current_user.get("id"),
+        "nurse_name": g.current_user.get("name") or g.current_user.get("email"),
         "created_at": now_iso(),
         "updated_at": now_iso()
     }
-    result = compatible_insert("medical_consultations", consultation)
     
-    supabase.table("patient_queue").update({
-        "status": "completed",
-        "updated_at": now_iso()
-    }).eq("patient_id", patient_id).in_("status", ["assigned", "in_consultation"]).execute()
-    
-    add_audit("CREATE", "consultation", f"Consultation terminée pour patient #{patient_id}", patient_id)
+    result = compatible_insert("hospitalization_followups", payload)
+    add_audit("CREATE", "hospitalization_followup", f"Suivi patient #{patient_id}", result.data[0]["id"] if result.data else None)
     invalidate_cache()
-    return jsonify({"message": "Consultation terminée", "consultation": result.data[0] if result.data else consultation})
+    return jsonify(result.data[0] if result.data else payload), 201
 
-@app.route("/api/workflow/status-history/<int:patient_id>", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_status_history(patient_id: int):
-    try:
-        result = supabase.table("status_history").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-        return jsonify(result.data or [])
-    except Exception:
-        return jsonify([])
-
-@app.route("/api/workflow/stats", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_workflow_stats():
-    try:
-        queue = supabase.table("patient_queue").select("*").execute().data or []
-        vitals = supabase.table("vital_signs").select("*").execute().data or []
-        consultations = supabase.table("medical_consultations").select("*").execute().data or []
-        hospitalizations = supabase.table("hospitalizations").select("*").execute().data or []
-        
-        stats = {
-            "total_patients": len(queue),
-            "waiting": len([q for q in queue if q.get("status") == "waiting"]),
-            "vitals_done": len([q for q in queue if q.get("status") == "vitals_done"]),
-            "assigned": len([q for q in queue if q.get("status") == "assigned"]),
-            "in_consultation": len([q for q in queue if q.get("status") == "in_consultation"]),
-            "completed": len([q for q in queue if q.get("status") == "completed"]),
-            "total_vitals": len(vitals),
-            "total_consultations": len(consultations),
-            "hospitalized": len([h for h in hospitalizations if h.get("status") == "hospitalized"]),
-            "discharged": len([h for h in hospitalizations if h.get("status") == "discharged"])
-        }
-        return jsonify(stats)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/workflow/patient/exit/<int:patient_id>", methods=["POST"])
+# ==================== EXCHANGE RATE ====================
+@app.route("/api/exchange-rate", methods=["GET"])
 @roles_required("super_admin", "reception")
-def exit_patient(patient_id: int):
+def get_exchange_rate():
+    """Récupère le taux de change actuel"""
+    try:
+        result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(1).execute()
+        if result.data:
+            return jsonify(result.data[0])
+    except Exception:
+        pass
+    return jsonify({"rate": 2800, "currency_from": "USD", "currency_to": "CDF", "created_at": now_iso()})
+
+@app.route("/api/exchange-rate", methods=["POST"])
+@roles_required("super_admin", "reception")
+def set_exchange_rate():
+    """Définit un nouveau taux de change"""
     data = fast_json()
+    rate = to_float(data.get("rate"))
+    if rate <= 0:
+        return jsonify({"error": "Le taux doit être supérieur à 0"}), 422
     
-    patient = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
-    if not patient.data:
-        return jsonify({"error": "Patient introuvable"}), 404
+    currency_from = data.get("from", "USD")
+    currency_to = data.get("to", "CDF")
     
-    supabase.table(TABLES["patients"]).update({
-        "status": "discharged",
-        "updated_at": now_iso()
-    }).eq("id", patient_id).execute()
-    
-    supabase.table("patient_queue").update({
-        "status": "completed",
-        "updated_at": now_iso()
-    }).eq("patient_id", patient_id).execute()
-    
-    if data.get("hospitalization_id"):
-        supabase.table("hospitalizations").update({
-            "status": "discharged",
-            "discharge_date": now_iso(),
-            "updated_at": now_iso()
-        }).eq("id", data.get("hospitalization_id")).execute()
-    
-    add_audit("UPDATE", "patient", f"Patient #{patient_id} sorti", patient_id)
-    invalidate_cache()
-    return jsonify({"message": "Patient sorti avec succès"})
-
-@app.route("/api/workflow/report/<int:patient_id>", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_workflow_report(patient_id: int):
-    patient = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
-    if not patient.data:
-        return jsonify({"error": "Patient introuvable"}), 404
-    
-    queue = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    vitals = supabase.table("vital_signs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    consultations = supabase.table("medical_consultations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    hospitalizations = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).order("admission_date", desc=True).execute().data or []
-    followups = supabase.table("medical_followups").select("*").eq("patient_id", patient_id).order("followup_date", desc=True).execute().data or []
-    administrations = supabase.table("medication_administrations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    prescriptions = supabase.table(TABLES["prescriptions"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    lab_tests = supabase.table(TABLES["lab_tests"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    invoices = supabase.table(TABLES["billing"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-    
-    report = {
-        "patient": patient.data[0],
-        "queue_history": queue,
-        "vitals": vitals,
-        "consultations": consultations,
-        "hospitalizations": hospitalizations,
-        "followups": followups,
-        "administrations": administrations,
-        "prescriptions": prescriptions,
-        "lab_tests": lab_tests,
-        "invoices": invoices,
-        "generated_at": now_iso()
-    }
-    return jsonify(report)
-
-# ==================== PING ====================
-@app.route("/api/ping", methods=["GET"])
-def ping():
-    """Route de ping pour garder le service actif"""
-    return jsonify({
-        "status": "alive",
-        "timestamp": now_iso(),
-        "message": "Service actif"
+    result = compatible_insert("exchange_rates", {
+        "rate": rate,
+        "currency_from": currency_from,
+        "currency_to": currency_to,
+        "set_by": g.current_user.get("id"),
+        "set_by_name": g.current_user.get("name") or g.current_user.get("email"),
+        "created_at": now_iso()
     })
+    
+    invalidate_cache()
+    add_audit("CREATE", "exchange_rate", f"Taux: 1 {currency_from} = {rate} {currency_to}", None)
+    return jsonify(result.data[0] if result.data else {"rate": rate, "currency_from": currency_from, "currency_to": currency_to, "created_at": now_iso()}), 201
+
+@app.route("/api/exchange-rate/history", methods=["GET"])
+@roles_required("super_admin", "reception")
+def get_exchange_rate_history():
+    """Récupère l'historique des taux de change"""
+    limit = to_int(request.args.get("limit"), 50)
+    result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute()
+    return jsonify(result.data or [])
 
 # ==================== PHARMACY ====================
 @app.route("/api/pharmacy", methods=["GET"])
@@ -3178,7 +3051,7 @@ def get_audit_logs():
 def health():
     return jsonify({"status": "ok", "timestamp": now_iso(), "version": "2.0.0"})
 
-# ==================== MATERNITÉ ROUTES ====================
+# ==================== MATERNITÉ ROUTES (AVEC FACTURATION AUTO) ====================
 @app.route("/api/maternity/pregnancies", methods=["GET"])
 @roles_required("super_admin")
 @cached(60)
@@ -3281,8 +3154,11 @@ def create_prenatal_consultation():
     data = fast_json()
     if not data.get("patient_id") or not data.get("visit_date"):
         return jsonify({"error": "Patient et date requis"}), 422
+    
+    patient_id = to_int(data.get("patient_id"))
+    
     consultation = {
-        "patient_id": to_int(data.get("patient_id")),
+        "patient_id": patient_id,
         "pregnancy_id": data.get("pregnancy_id"),
         "visit_date": data.get("visit_date"),
         "weight": data.get("weight"),
@@ -3296,6 +3172,10 @@ def create_prenatal_consultation():
         "updated_at": now_iso()
     }
     result = compatible_insert("prenatal_consultations", consultation)
+    
+    # Facturation automatique de la CPN
+    facture_auto(patient_id, "CPN", 1, "prenatal", result.data[0].get("id"))
+    
     add_audit("CREATE", "prenatal", f"Consultation prénatale #{result.data[0]['id']}", result.data[0]["id"])
     invalidate_cache()
     return jsonify(result.data[0]), 201
@@ -3308,6 +3188,7 @@ def get_prenatal_consultation(consultation_id: int):
         return jsonify({"error": "Consultation introuvable"}), 404
     return jsonify(result.data[0])
 
+# ==================== DELIVERIES (AVEC FACTURATION AUTO) ====================
 @app.route("/api/maternity/deliveries", methods=["GET"])
 @roles_required("super_admin")
 @cached(60)
@@ -3332,14 +3213,19 @@ def create_delivery():
     data = fast_json()
     if not data.get("patient_id") or not data.get("delivery_date"):
         return jsonify({"error": "Patient et date requis"}), 422
+    
+    patient_id = to_int(data.get("patient_id"))
     pregnancy_id = data.get("pregnancy_id")
+    delivery_type = data.get("delivery_type", "vaginal")
+    
     if pregnancy_id:
         supabase.table("pregnancies").update({"status": "completed", "updated_at": now_iso()}).eq("id", pregnancy_id).execute()
+    
     delivery = {
-        "patient_id": to_int(data.get("patient_id")),
+        "patient_id": patient_id,
         "pregnancy_id": pregnancy_id,
         "delivery_date": data.get("delivery_date"),
-        "delivery_type": data.get("delivery_type", "vaginal"),
+        "delivery_type": delivery_type,
         "baby_count": data.get("baby_count", 1),
         "babies": json.dumps(data.get("babies", [])),
         "baby_weight": data.get("baby_weight"),
@@ -3351,13 +3237,20 @@ def create_delivery():
         "updated_at": now_iso()
     }
     result = compatible_insert("deliveries", delivery)
+    created_delivery = result.data[0] if result.data else delivery
+    
+    # Facturation automatique de l'accouchement
+    tarif_code = "ACC_VAG" if delivery_type == "vaginal" else "ACC_CES"
+    facture_auto(patient_id, tarif_code, 1, "delivery", created_delivery.get("id"))
+    
+    # Créer les fiches enfants
     babies = data.get("babies", [])
     for idx, baby in enumerate(babies):
         child_data = {
-            "full_name": f"Bébé de la patiente #{data.get('patient_id')}",
+            "full_name": f"Bébé de la patiente #{patient_id}",
             "date_of_birth": data.get("delivery_date"),
             "gender": baby.get("gender", "M"),
-            "parent_id": data.get("patient_id"),
+            "parent_id": patient_id,
             "blood_type": baby.get("blood_type", ""),
             "birth_weight": baby.get("weight"),
             "birth_height": baby.get("height"),
@@ -3368,9 +3261,10 @@ def create_delivery():
             compatible_insert("children", child_data)
         except Exception as exc:
             print(f" Fiche enfant non créée après accouchement: {exc}")
-    add_audit("CREATE", "delivery", f"Accouchement #{result.data[0]['id']}", result.data[0]["id"])
+    
+    add_audit("CREATE", "delivery", f"Accouchement #{created_delivery.get('id')}", created_delivery.get("id"))
     invalidate_cache()
-    return jsonify(result.data[0]), 201
+    return jsonify(created_delivery), 201
 
 @app.route("/api/maternity/deliveries/<int:delivery_id>", methods=["GET"])
 @roles_required("super_admin")
@@ -3386,6 +3280,7 @@ def get_delivery(delivery_id: int):
         delivery["babies"] = json.loads(delivery["babies"]) if isinstance(delivery["babies"], str) else delivery["babies"]
     return jsonify(delivery)
 
+# ==================== MATERNITY ROOMS ====================
 @app.route("/api/maternity/rooms", methods=["GET"])
 @roles_required("super_admin")
 @cached(60)
@@ -4007,6 +3902,26 @@ def health_detailed():
         status["services"]["cache"] = "unhealthy"
     return jsonify(status)
 
+# ==================== AUTO-PING (KEEP ALIVE) ====================
+import threading
+
+def auto_ping():
+    """Ping auto toutes les 5 minutes pour garder l'API active"""
+    import requests
+    url = f"http://{HOST}:{PORT}/api/health"
+    while True:
+        try:
+            requests.get(url, timeout=5)
+            print(f"[AUTO-PING] Ping réussi à {url}")
+        except Exception as e:
+            print(f"[AUTO-PING] Échec du ping: {e}")
+        time.sleep(300)
+
+# Démarrer le thread de ping
+if __name__ != "__main__":
+    ping_thread = threading.Thread(target=auto_ping, daemon=True)
+    ping_thread.start()
+
 # ==================== SEED ====================
 def seed_admin():
     existing = supabase.table(TABLES["users"]).select("id").eq("email", "jeremyodimba322@gmail.com").execute()
@@ -4024,128 +3939,70 @@ def seed_admin():
 
 # ==================== INITIALISATION TABLES ====================
 def init_workflow_tables():
-    """Initialise les tables nécessaires pour le workflow patient"""
-    workflow_tables = [
-        "patient_queue",
-        "patient_dispatches",
-        "medical_consultations",
-        "vital_signs",
-        "patient_account_lines",
-        "patient_accounts",
-        "patient_account_transactions",
-        "hospitalizations",
-        "medical_followups",
-        "medication_administrations",
-        "pharmacy_movements",
-        "prescription_dispenses",
-        "medical_boxes",
-        "status_history"
+    tables = [
+        "patient_queue", "patient_dispatches", "medical_consultations",
+        "vital_signs", "patient_account_lines", "patient_accounts",
+        "patient_account_transactions", "hospitalizations", "medical_followups",
+        "medication_administrations", "pharmacy_movements", "prescription_dispenses"
     ]
-    
-    for table in workflow_tables:
+    for table in tables:
         try:
             supabase.table(table).select("*").limit(1).execute()
             print(f" Table {table} existe déjà")
         except Exception as e:
             print(f" Table {table} à créer: {str(e)[:100]}")
-    
-    # Créer 2 boxes par défaut
-    try:
-        # Vérifier si des boxes existent déjà
-        existing_boxes = supabase.table("medical_boxes").select("*").limit(1).execute()
-        if not existing_boxes.data:
-            # Créer 2 boxes par défaut
-            for i in range(1, 3):
-                try:
-                    supabase.table("medical_boxes").insert({
-                        "box_number": str(i),
-                        "status": "free",
-                        "created_by": None,
-                        "created_by_name": "Systeme",
-                        "created_at": now_iso(),
-                        "updated_at": now_iso()
-                    }).execute()
-                    print(f" Box {i} créé par défaut")
-                except Exception as e:
-                    print(f" Erreur création Box {i}: {str(e)[:100]}")
-        else:
-            print(" Box existants, création des boxes par défaut ignorée")
-    except Exception as e:
-        print(f" Vérification boxes: {str(e)[:100]}")
 
 def init_maternity_tables():
-    """Initialise les tables pour la maternité et la pédiatrie"""
-    maternity_tables = [
-        "pregnancies",
-        "prenatal_consultations",
-        "deliveries",
-        "maternity_rooms",
-        "children",
-        "vaccinations",
-        "growth_measurements"
+    tables = [
+        "pregnancies", "prenatal_consultations", "deliveries",
+        "maternity_rooms", "children", "vaccinations", "growth_measurements"
     ]
-    
-    for table in maternity_tables:
+    for table in tables:
         try:
             supabase.table(table).select("*").limit(1).execute()
             print(f" Table {table} existe déjà")
         except Exception as e:
             print(f" Table {table} à créer: {str(e)[:100]}")
 
-# ==================== AUTO PING ====================
-def start_ping_thread():
-    """Démarre un thread pour pinger le service toutes les 14 minutes"""
-    def ping_loop():
-        import requests
-        import socket
-        
-        # Obtenir l'adresse IP locale réelle
-        def get_local_ip():
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
-                s.close()
-                return ip
-            except:
-                return "127.0.0.1"
-        
-        local_ip = get_local_ip()
-        local_url = f"http://jokair.onrender.com/api/ping"
-        external_url = "https://jokair.onrender.com/api/ping"
-        # Alternative avec localhost
-        localhost_url = f"http://127.0.0.1:{PORT}/api/ping"
-        
-        while True:
-            time.sleep(14 * 60)  # 14 minutes
-            ping_success = False
-            
-            # Essayer différentes adresses locales
-            for url in [localhost_url, local_url]:
-                try:
-                    response = requests.get(url, timeout=5)
-                    if response.status_code == 200:
-                        print(f"✅ Auto-ping réussi sur {url} à {now_iso()}")
-                        ping_success = True
-                        break
-                except Exception:
-                    continue
-            
-            # Si local échoue, essayer l'URL externe
-            if not ping_success:
-                try:
-                    response = requests.get(external_url, timeout=10)
-                    if response.status_code == 200:
-                        print(f"✅ Auto-ping externe réussi à {now_iso()}")
-                        ping_success = True
-                    else:
-                        print(f"⚠️ Auto-ping externe: status {response.status_code}")
-                except Exception as e:
-                    print(f"❌ Auto-ping échoué: {str(e)[:50]}")
-    
-    thread = threading.Thread(target=ping_loop, daemon=True)
-    thread.start()
-    print("🔄 Auto-ping démarré (toutes les 14 minutes)")
+def init_exchange_rate_table():
+    try:
+        supabase.table("exchange_rates").select("*").limit(1).execute()
+        print(" Table exchange_rates existe déjà")
+    except Exception:
+        print(" Table exchange_rates à créer")
+        try:
+            supabase.table("exchange_rates").insert({
+                "rate": 2800,
+                "currency_from": "USD",
+                "currency_to": "CDF",
+                "set_by": None,
+                "set_by_name": "Systeme",
+                "created_at": now_iso()
+            }).execute()
+            print(" Table exchange_rates créée avec taux par défaut 2800")
+        except Exception as e:
+            print(f" Impossible de créer exchange_rates: {e}")
+
+def init_hospitalization_followups_table():
+    try:
+        supabase.table("hospitalization_followups").select("*").limit(1).execute()
+        print(" Table hospitalization_followups existe déjà")
+    except Exception:
+        print(" Table hospitalization_followups à créer")
+        try:
+            supabase.table("hospitalization_followups").insert({
+                "patient_id": 1,
+                "temperature": 36.5,
+                "general_state": "good",
+                "nurse_id": 1,
+                "nurse_name": "Systeme",
+                "created_at": now_iso()
+            }).execute()
+            supabase.table("hospitalization_followups").delete().eq("patient_id", 1).execute()
+            print(" Table hospitalization_followups créée")
+        except Exception as e:
+            print(f" Impossible de créer hospitalization_followups: {e}")
+
 # ==================== LANCEMENT ====================
 if __name__ == "__main__":
     print("=" * 50)
@@ -4154,7 +4011,8 @@ if __name__ == "__main__":
     seed_admin()
     init_workflow_tables()
     init_maternity_tables()
-    start_ping_thread()
+    init_exchange_rate_table()
+    init_hospitalization_followups_table()
     print(f" Serveur démarré sur http://{HOST}:{PORT}")
     print("=" * 50)
     app.run(host=HOST, port=PORT, debug=DEBUG, threaded=True)
