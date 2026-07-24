@@ -2282,6 +2282,19 @@ def get_medical_boxes():
         print(f"Erreur récupération box: {e}")
         return jsonify([])
 
+@app.route("/api/medical/boxes/<int:box_id>", methods=["GET"])
+@roles_required("super_admin", "infirmier", "docteur", "reception")
+@cached(timeout=30)
+def get_medical_box(box_id: int):
+    try:
+        result = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
+        if not result.data:
+            return jsonify({"error": "Box introuvable"}), 404
+        return jsonify(result.data[0])
+    except Exception as e:
+        print(f"Erreur récupération box {box_id}: {e}")
+        return jsonify({"error": "Box introuvable"}), 404
+
 @app.route("/api/medical/boxes", methods=["POST"])
 @roles_required("super_admin", "infirmier")
 def create_medical_box():
