@@ -22,12 +22,29 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from supabase import create_client, Client
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# ==================== REDIS CACHE ====================
+# Utiliser Redis si disponible, sinon SimpleCache
+REDIS_URL = os.getenv("REDIS_URL", "")
+if REDIS_URL:
+    try:
+        import redis
+        redis_client = redis.from_url(REDIS_URL)
+        redis_client.ping()
+        print(f"✅ Redis connecté sur {REDIS_URL}")
+        CACHE_TYPE = "RedisCache"
+    except Exception as e:
+        print(f"⚠️ Redis indisponible: {e}, utilisation SimpleCache")
+        CACHE_TYPE = "SimpleCache"
+else:
+    print("ℹ️ REDIS_URL non définie, utilisation SimpleCache")
+    CACHE_TYPE = "SimpleCache"
+
 # ==================== CONFIGURATION ====================
 SUPABASE_URL = "https://figmeixteescztmmprmi.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpZ21laXh0ZWVzY3p0bW1wcm1pIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTM4NjA2MCwiZXhwIjoyMDkwOTYyMDYwfQ.zMIDYvm-Bwv0EUQzME3nZR8ZPoSwTMCaybHRnw_-7Ew"
-SECRET_KEY = "ihub_super_secret_key_2024"
-GROQ_API_KEY = "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"
-GROQ_MODEL = "llama-3.1-8b-instant"
+SECRET_KEY = os.getenv("SECRET_KEY", "ihub_super_secret_key_2024")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 HOST = "0.0.0.0"
 PORT = 10000
 DEBUG = True
@@ -37,8 +54,8 @@ CACHE_TIMEOUT = 300
 # ==================== INITIALISATION ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
-app.config["CACHE_TYPE"] = "RedisCache" if os.getenv("REDIS_URL") else "SimpleCache"
-app.config["CACHE_REDIS_URL"] = os.getenv("REDIS_URL", "")
+app.config["CACHE_TYPE"] = CACHE_TYPE
+app.config["CACHE_REDIS_URL"] = REDIS_URL
 app.config["CACHE_DEFAULT_TIMEOUT"] = CACHE_TIMEOUT
 app.config["JSON_AS_ASCII"] = False
 
@@ -103,6 +120,42 @@ TABLES = {
 ROLES = {
     "public": ["docteur", "infirmier", "laboratoire", "pharmacie", "reception"],
     "staff": ["super_admin", "docteur", "infirmier", "laboratoire", "pharmacie", "reception"],
+}
+
+# ==================== GRILLE TARIFAIRE COMPLÈTE (BASE DE DONNÉES) ====================
+# Cette constante est conservée pour compatibilité, mais facture_auto utilise la base
+# Ne plus utiliser TARIFS directement dans facture_auto
+TARIFS = {
+    "CONSULT": {"label": "Consultation médicale générale", "price_usd": 15, "category": "Consultation"},
+    "URGENCE": {"label": "Consultation d'urgence", "price_usd": 20, "category": "Consultation"},
+    "CONTROLE": {"label": "Consultation de contrôle", "price_usd": 12, "category": "Consultation"},
+    "SOIN_BASE": {"label": "Soin infirmier", "price_usd": 5, "category": "Soins"},
+    "SOIN_PANSEMENT": {"label": "Pansement", "price_usd": 5, "category": "Soins"},
+    "SOIN_INJECTION": {"label": "Injection", "price_usd": 3, "category": "Soins"},
+    "SOIN_PERFUSION": {"label": "Perfusion", "price_usd": 8, "category": "Soins"},
+    "SOIN_SUTURE": {"label": "Suture", "price_usd": 10, "category": "Soins"},
+    "SOIN_PLATRE": {"label": "Plâtre", "price_usd": 20, "category": "Soins"},
+    "HEMO": {"label": "Hémogramme complet", "price_usd": 15, "category": "Laboratoire"},
+    "HEP": {"label": "Bilan hépatique", "price_usd": 15, "category": "Laboratoire"},
+    "REN": {"label": "Bilan rénal", "price_usd": 15, "category": "Laboratoire"},
+    "LIP": {"label": "Bilan lipidique", "price_usd": 15, "category": "Laboratoire"},
+    "URINE": {"label": "Analyse d'urine", "price_usd": 10, "category": "Laboratoire"},
+    "MEDIC_BASE": {"label": "Médicament", "price_usd": 5, "category": "Pharmacie"},
+    "MEDIC_ANTIB": {"label": "Antibiotique", "price_usd": 8, "category": "Pharmacie"},
+    "MEDIC_SPEC": {"label": "Médicament spécialisé", "price_usd": 15, "category": "Pharmacie"},
+    "ADMISSION": {"label": "Admission / frais de dossier", "price_usd": 15, "category": "Hospitalisation"},
+    "HOSPI_JOUR": {"label": "Hospitalisation / jour", "price_usd": 20, "category": "Hospitalisation"},
+    "CHAMBRE_PRIV": {"label": "Chambre privée / jour", "price_usd": 35, "category": "Hospitalisation"},
+    "HOSPI_USI": {"label": "Soins intensifs / jour", "price_usd": 50, "category": "Hospitalisation"},
+    "SORTIE": {"label": "Bulletin de sortie", "price_usd": 5, "category": "Hospitalisation"},
+    "ACC_VAG": {"label": "Accouchement voie basse", "price_usd": 100, "category": "Maternité"},
+    "ACC_CES": {"label": "Accouchement césarienne", "price_usd": 180, "category": "Maternité"},
+    "CPN": {"label": "Consultation prénatale", "price_usd": 15, "category": "Maternité"},
+    "ECHO_OBST": {"label": "Échographie obstétricale", "price_usd": 25, "category": "Maternité"},
+    "LIT_MAT": {"label": "Lit maternité / jour", "price_usd": 25, "category": "Maternité"},
+    "RADIO_THO": {"label": "Radiographie thorax", "price_usd": 20, "category": "Imagerie"},
+    "SCAN": {"label": "Scanner", "price_usd": 60, "category": "Imagerie"},
+    "IRM": {"label": "IRM", "price_usd": 100, "category": "Imagerie"},
 }
 
 # ==================== UTILITAIRES ====================
@@ -460,7 +513,7 @@ def create_service_invoice(patient_id: int, description: str, amount: float, sou
         compatible_update("patient_account_lines", {"status": "invoiced", "invoice_id": created["id"], "updated_at": now_iso()}, "id", account_line.get("id"))
     return created
 
-# ==================== FACTURATION AUTOMATIQUE ====================
+# ==================== FACTURATION AUTOMATIQUE (UTILISE LA BASE) ====================
 def get_current_rate():
     """Récupère le taux de change actuel depuis la base"""
     try:
@@ -471,20 +524,26 @@ def get_current_rate():
         pass
     return 2800
 
+def get_tarif_from_db(code_tarif):
+    """Récupère un tarif depuis la base de données"""
+    try:
+        result = supabase.table(TABLES["tariffs"]).select("*").eq("code", code_tarif).eq("is_active", True).execute()
+        if result.data:
+            return result.data[0]
+        # Essayer par catégorie
+        result = supabase.table(TABLES["tariffs"]).select("*").eq("category", code_tarif).eq("is_active", True).execute()
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception:
+        return None
+
 def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
     """Génère une facture automatiquement depuis la base de données"""
-    # Récupérer le tarif depuis la base
-    try:
-        tarif_result = supabase.table(TABLES["tariffs"]).select("*").eq("code", code_tarif).eq("is_active", True).execute()
-        if not tarif_result.data:
-            # Essayer de trouver par catégorie/label
-            tarif_result = supabase.table(TABLES["tariffs"]).select("*").eq("category", code_tarif).eq("is_active", True).execute()
-            if not tarif_result.data:
-                print(f"Tarif non trouvé pour le code: {code_tarif}")
-                return None
-        tarif = tarif_result.data[0]
-    except Exception as e:
-        print(f"Erreur récupération tarif: {e}")
+    # 1. Récupérer le tarif depuis la base
+    tarif = get_tarif_from_db(code_tarif)
+    if not tarif:
+        print(f"Tarif non trouvé pour le code: {code_tarif}")
         return None
     
     taux = get_current_rate()
@@ -645,6 +704,7 @@ def auth_me():
 # ==================== PATIENTS ====================
 @app.route("/api/patients", methods=["GET"])
 @roles_required(*ROLES["staff"])
+@cached(timeout=120)  # Cache 2 minutes
 def get_patients():
     search = request.args.get("search", "").strip().lower()
     context = request.args.get("context", "").strip().lower()
@@ -691,6 +751,7 @@ def create_patient():
         "priority": data.get("priority", "normal"),
         "doctor_notes": data.get("doctor_notes", ""),
         "room_number": data.get("room_number", ""),
+        "is_pregnant": data.get("is_pregnant", False),
         "created_by": g.current_user.get("id"),
         "created_by_name": g.current_user.get("name") or g.current_user.get("email"),
         "created_at": now_iso(),
@@ -735,6 +796,7 @@ def create_patient():
 
 @app.route("/api/patients/<int:patient_id>", methods=["GET"])
 @roles_required(*ROLES["staff"])
+@cached(timeout=60)
 def get_patient(patient_id: int):
     result = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
     if not result.data:
@@ -850,11 +912,14 @@ def regenerate_patient_barcode(patient_id: int):
 # ==================== APPOINTMENTS ====================
 @app.route("/api/appointments", methods=["GET"])
 @roles_required(*ROLES["staff"])
+@cached(timeout=60)  # Cache 1 minute
 def get_appointments():
     status = request.args.get("status")
     patient_id = request.args.get("patient_id")
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
+    limit = min(max(to_int(request.args.get("limit"), 100), 1), 500)
+    offset = to_int(request.args.get("offset"), 0)
     query = supabase.table(TABLES["appointments"]).select("*")
     if status:
         query = query.eq("status", status)
@@ -864,7 +929,7 @@ def get_appointments():
         query = query.gte("date", date_from)
     if date_to:
         query = query.lte("date", date_to)
-    result = query.order("date", desc=True).execute()
+    result = query.order("date", desc=True).limit(limit).offset(offset).execute()
     appointments = filter_appointments_for_role(result.data or [])
     patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
     patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
@@ -1441,12 +1506,14 @@ def delete_care_log(care_id: int):
 # ==================== PARCOURS PATIENT ====================
 @app.route("/api/workflow/doctors", methods=["GET"])
 @roles_required("super_admin", "infirmier", "reception", "docteur")
+@cached(timeout=120)
 def get_workflow_doctors():
     users = supabase.table(TABLES["users"]).select("id,name,email,role").eq("role", "docteur").execute()
     return jsonify(users.data or [])
 
 @app.route("/api/workflow/queue", methods=["GET"])
 @roles_required("super_admin", "reception", "infirmier", "docteur")
+@cached(timeout=30)
 def get_patient_queue():
     role = g.current_user.get("role")
     status = request.args.get("status", "").strip()
@@ -1472,7 +1539,7 @@ def get_patient_queue():
     return jsonify(rows)
 
 @app.route("/api/workflow/queue", methods=["POST"])
-@roles_required("super_admin", "reception")
+@roles_required("super_admin", "reception", "infirmier")
 def add_patient_to_queue():
     data = fast_json()
     patient_id = to_int(data.get("patient_id"))
@@ -2165,6 +2232,7 @@ def workflow_hospitalization_followups():
 # ==================== EXCHANGE RATE ====================
 @app.route("/api/exchange-rate", methods=["GET"])
 @roles_required("super_admin", "reception")
+@cached(timeout=300)
 def get_exchange_rate():
     """Récupère le taux de change actuel"""
     try:
@@ -2202,11 +2270,132 @@ def set_exchange_rate():
 
 @app.route("/api/exchange-rate/history", methods=["GET"])
 @roles_required("super_admin", "reception")
+@cached(timeout=300)
 def get_exchange_rate_history():
     """Récupère l'historique des taux de change"""
     limit = to_int(request.args.get("limit"), 50)
     result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute()
     return jsonify(result.data or [])
+
+# ==================== MEDICAL BOXES ====================
+@app.route("/api/medical/boxes", methods=["GET"])
+@roles_required("super_admin", "infirmier", "docteur", "reception")
+@cached(timeout=30)
+def get_medical_boxes():
+    """Liste tous les box de consultation"""
+    try:
+        result = supabase.table("medical_boxes").select("*").order("box_number").execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        print(f"Erreur récupération box: {e}")
+        # Si la table n'existe pas, retourner une liste vide
+        return jsonify([])
+
+@app.route("/api/medical/boxes", methods=["POST"])
+@roles_required("super_admin", "infirmier")
+def create_medical_box():
+    """Crée un nouveau box de consultation"""
+    data = fast_json()
+    if not data.get("box_number"):
+        return jsonify({"error": "Numéro de box requis"}), 422
+    
+    box = {
+        "box_number": data.get("box_number"),
+        "status": "free",
+        "doctor_id": None,
+        "doctor_name": None,
+        "patient_id": None,
+        "patient_name": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    result = compatible_insert("medical_boxes", box)
+    add_audit("CREATE", "medical_box", f"Box {data['box_number']} créé", result.data[0]["id"])
+    invalidate_cache()
+    return jsonify(result.data[0]), 201
+
+@app.route("/api/medical/boxes/<int:box_id>/assign", methods=["PUT"])
+@roles_required("super_admin", "infirmier")
+def assign_medical_box(box_id: int):
+    """Assigne un médecin à un box"""
+    data = fast_json()
+    doctor_id = data.get("doctor_id")
+    if not doctor_id:
+        return jsonify({"error": "Médecin requis"}), 422
+    
+    # Récupérer le médecin
+    doctor = supabase.table(TABLES["users"]).select("id,name").eq("id", doctor_id).execute()
+    if not doctor.data:
+        return jsonify({"error": "Médecin introuvable"}), 404
+    
+    # Vérifier que le box existe
+    box = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
+    if not box.data:
+        return jsonify({"error": "Box introuvable"}), 404
+    
+    result = supabase.table("medical_boxes").update({
+        "doctor_id": doctor_id,
+        "doctor_name": doctor.data[0].get("name"),
+        "status": "free",
+        "updated_at": now_iso()
+    }).eq("id", box_id).execute()
+    
+    add_audit("UPDATE", "medical_box", f"Box #{box_id} assigné au médecin #{doctor_id}", box_id)
+    invalidate_cache()
+    return jsonify(result.data[0])
+
+@app.route("/api/medical/boxes/<int:box_id>/free", methods=["PUT"])
+@roles_required("super_admin", "infirmier")
+def free_medical_box(box_id: int):
+    """Libère un box (supprime le patient et remet en libre)"""
+    result = supabase.table("medical_boxes").update({
+        "status": "free",
+        "patient_id": None,
+        "patient_name": None,
+        "occupied_at": None,
+        "updated_at": now_iso()
+    }).eq("id", box_id).execute()
+    if not result.data:
+        return jsonify({"error": "Box introuvable"}), 404
+    
+    add_audit("UPDATE", "medical_box", f"Box #{box_id} libéré", box_id)
+    invalidate_cache()
+    return jsonify(result.data[0])
+
+@app.route("/api/medical/boxes/<int:box_id>/occupy", methods=["PUT"])
+@roles_required("super_admin", "infirmier", "docteur")
+def occupy_medical_box(box_id: int):
+    """Occupe un box avec un patient"""
+    data = fast_json()
+    patient_id = data.get("patient_id")
+    if not patient_id:
+        return jsonify({"error": "Patient requis"}), 422
+    
+    # Récupérer le patient
+    patient = supabase.table(TABLES["patients"]).select("id,full_name").eq("id", patient_id).execute()
+    if not patient.data:
+        return jsonify({"error": "Patient introuvable"}), 404
+    
+    # Vérifier que le box existe
+    box = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
+    if not box.data:
+        return jsonify({"error": "Box introuvable"}), 404
+    
+    # Vérifier qu'un médecin est assigné
+    if not box.data[0].get("doctor_id"):
+        return jsonify({"error": "Aucun médecin assigné à ce box"}), 422
+    
+    result = supabase.table("medical_boxes").update({
+        "status": "occupied",
+        "patient_id": patient_id,
+        "patient_name": patient.data[0].get("full_name"),
+        "occupied_at": now_iso(),
+        "updated_at": now_iso()
+    }).eq("id", box_id).execute()
+    
+    add_audit("UPDATE", "medical_box", f"Box #{box_id} occupé par patient #{patient_id}", box_id)
+    invalidate_cache()
+    return jsonify(result.data[0])
 
 # ==================== PHARMACY ====================
 @app.route("/api/pharmacy", methods=["GET"])
@@ -2798,6 +2987,7 @@ def delete_invoice(invoice_id: int):
 # ==================== BILLING ACCOUNTS ====================
 @app.route("/api/billing/accounts", methods=["GET"])
 @roles_required("super_admin", "reception")
+@cached(120)
 def get_billing_accounts():
     result = supabase.table("patient_accounts").select("*").order("patient_id").execute()
     accounts = result.data or []
@@ -2904,6 +3094,7 @@ def get_account_transactions(patient_id: int):
 # ==================== SUBSCRIBERS ====================
 @app.route("/api/subscribers", methods=["GET"])
 @roles_required("super_admin", "reception")
+@cached(300)
 def get_subscribers():
     result = supabase.table("subscribers").select("*").order("name").execute()
     return jsonify(result.data or [])
@@ -3053,7 +3244,7 @@ def health():
 
 # ==================== MATERNITÉ ROUTES (AVEC FACTURATION AUTO) ====================
 @app.route("/api/maternity/pregnancies", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 @cached(60)
 def get_pregnancies():
     patient_id = request.args.get("patient_id")
@@ -3096,7 +3287,7 @@ def create_pregnancy():
     return jsonify(result.data[0]), 201
 
 @app.route("/api/maternity/pregnancies/<int:pregnancy_id>", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 def get_pregnancy(pregnancy_id: int):
     result = supabase.table("pregnancies").select("*").eq("id", pregnancy_id).execute()
     if not result.data:
@@ -3124,13 +3315,13 @@ def update_pregnancy(pregnancy_id: int):
     return jsonify(result.data[0])
 
 @app.route("/api/maternity/pregnancies/<int:pregnancy_id>/followups", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 def get_pregnancy_followups(pregnancy_id: int):
     result = supabase.table("prenatal_consultations").select("*").eq("pregnancy_id", pregnancy_id).order("visit_date", desc=True).execute()
     return jsonify(result.data)
 
 @app.route("/api/maternity/prenatal", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 @cached(60)
 def get_prenatal_consultations():
     patient_id = request.args.get("patient_id")
@@ -3181,7 +3372,7 @@ def create_prenatal_consultation():
     return jsonify(result.data[0]), 201
 
 @app.route("/api/maternity/prenatal/<int:consultation_id>", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 def get_prenatal_consultation(consultation_id: int):
     result = supabase.table("prenatal_consultations").select("*").eq("id", consultation_id).execute()
     if not result.data:
@@ -3190,7 +3381,7 @@ def get_prenatal_consultation(consultation_id: int):
 
 # ==================== DELIVERIES (AVEC FACTURATION AUTO) ====================
 @app.route("/api/maternity/deliveries", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 @cached(60)
 def get_deliveries():
     patient_id = request.args.get("patient_id")
@@ -3267,7 +3458,7 @@ def create_delivery():
     return jsonify(created_delivery), 201
 
 @app.route("/api/maternity/deliveries/<int:delivery_id>", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 def get_delivery(delivery_id: int):
     result = supabase.table("deliveries").select("*").eq("id", delivery_id).execute()
     if not result.data:
@@ -3282,7 +3473,7 @@ def get_delivery(delivery_id: int):
 
 # ==================== MATERNITY ROOMS ====================
 @app.route("/api/maternity/rooms", methods=["GET"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 @cached(60)
 def get_maternity_rooms():
     result = supabase.table("maternity_rooms").select("*").order("room_number").execute()
@@ -3295,7 +3486,7 @@ def get_maternity_rooms():
     return jsonify(rooms)
 
 @app.route("/api/maternity/rooms", methods=["POST"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier")
 def create_maternity_room():
     data = fast_json()
     if not data.get("room_number"):
@@ -3313,7 +3504,7 @@ def create_maternity_room():
     return jsonify(result.data[0]), 201
 
 @app.route("/api/maternity/rooms/admit", methods=["POST"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier")
 def admit_to_maternity():
     data = fast_json()
     if not data.get("room_id") or not data.get("patient_id"):
@@ -3336,7 +3527,7 @@ def admit_to_maternity():
     return jsonify(result.data[0])
 
 @app.route("/api/maternity/rooms/<int:room_id>/discharge", methods=["POST"])
-@roles_required("super_admin")
+@roles_required("super_admin", "infirmier")
 def discharge_from_maternity(room_id: int):
     updates = {
         "status": "available",
@@ -3983,6 +4174,24 @@ def init_exchange_rate_table():
         except Exception as e:
             print(f" Impossible de créer exchange_rates: {e}")
 
+def init_medical_boxes_table():
+    try:
+        supabase.table("medical_boxes").select("*").limit(1).execute()
+        print(" Table medical_boxes existe déjà")
+    except Exception:
+        print(" Table medical_boxes à créer")
+        try:
+            supabase.table("medical_boxes").insert({
+                "box_number": "1",
+                "status": "free",
+                "created_at": now_iso(),
+                "updated_at": now_iso()
+            }).execute()
+            supabase.table("medical_boxes").delete().eq("box_number", "1").execute()
+            print(" Table medical_boxes créée")
+        except Exception as e:
+            print(f" Impossible de créer medical_boxes: {e}")
+
 def init_hospitalization_followups_table():
     try:
         supabase.table("hospitalization_followups").select("*").limit(1).execute()
@@ -4006,12 +4215,14 @@ def init_hospitalization_followups_table():
 # ==================== LANCEMENT ====================
 if __name__ == "__main__":
     print("=" * 50)
-    print(" I HUB HOSPITAL API - VERSION COMPLÈTE")
+    print(" I HUB HOSPITAL API - VERSION COMPLÈTE AVEC REDIS")
     print("=" * 50)
+    print(f" Cache: {CACHE_TYPE}")
     seed_admin()
     init_workflow_tables()
     init_maternity_tables()
     init_exchange_rate_table()
+    init_medical_boxes_table()
     init_hospitalization_followups_table()
     print(f" Serveur démarré sur http://{HOST}:{PORT}")
     print("=" * 50)
