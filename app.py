@@ -3634,7 +3634,7 @@ def get_hospitalization_details(patient_id: int):
         return jsonify({"error": "Aucune hospitalisation en cours"}), 404
     return jsonify(result.data[0])
 
-@app.route("/api/hospitalization/rooms/<int:room_id>/occupy", methods=["POST"])
+@app.route("/api/hospitalization/rooms/<int:room_id>/occupy", methods=["PUT"])
 @roles_required("super_admin", "infirmier", "docteur")
 def occupy_hospitalization_room(room_id: int):
     data = fast_json()
