@@ -1848,6 +1848,10 @@ def dispatch_patient():
         "created_at": now_iso()
     }
     result = compatible_insert("patient_dispatches", payload)
+
+
+
+    
     supabase.table("patient_queue").update({
     "status": "assigned",
     "assigned_doctor_id": doctor_id,
