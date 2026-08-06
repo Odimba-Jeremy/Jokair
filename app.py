@@ -1849,19 +1849,23 @@ def dispatch_patient():
     }
     result = compatible_insert("patient_dispatches", payload)
 
-
-
-    
+    # ✅ CES 5 LIGNES SONT BIEN INDENTÉES
     supabase.table("patient_queue").update({
-    "status": "assigned",
-    "assigned_doctor_id": doctor_id,
-    "assigned_doctor_name": payload["doctor_name"],
-    "updated_at": now_iso()
-}).eq("patient_id", patient_id).execute()
-supabase.table(TABLES["patients"]).update({"status": "assigned", "assigned_doctor_id": doctor_id, "updated_at": now_iso()}).eq("id", patient_id).execute()
-add_audit("CREATE", "dispatch", f"Patient #{patient_id} assigne a {payload['doctor_name']}", patient_id)
-invalidate_cache()
-return jsonify(result.data[0]), 201
+        "status": "assigned",
+        "assigned_doctor_id": doctor_id,
+        "assigned_doctor_name": payload["doctor_name"],
+        "updated_at": now_iso()
+    }).eq("patient_id", patient_id).execute()
+
+    supabase.table(TABLES["patients"]).update({
+        "status": "assigned",
+        "assigned_doctor_id": doctor_id,
+        "updated_at": now_iso()
+    }).eq("id", patient_id).execute()
+
+    add_audit("CREATE", "dispatch", f"Patient #{patient_id} assigne a {payload['doctor_name']}", patient_id)
+    invalidate_cache()
+    return jsonify(result.data[0]), 201
 
 @app.route("/api/workflow/dispatches", methods=["GET"])
 @roles_required(*ROLES["staff"])
