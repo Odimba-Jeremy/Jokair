@@ -1737,7 +1737,7 @@ def dispatch_patient():
         "assigned_doctor_id": doctor_id,
         "assigned_doctor_name": payload["doctor_name"],
         "updated_at": now_iso()
-    }).eq("patient_id", patient_id).in_("status", ["vitals_done", "assigned"]).execute()
+    }).eq("patient_id", patient_id).execute()
     supabase.table(TABLES["patients"]).update({"status": "assigned", "assigned_doctor_id": doctor_id, "updated_at": now_iso()}).eq("id", patient_id).execute()
     add_audit("CREATE", "dispatch", f"Patient #{patient_id} assigne a {payload['doctor_name']}", patient_id)
     invalidate_cache()
@@ -1797,7 +1797,7 @@ def workflow_consultations():
     consultation_line = None
     if consultation_fee > 0:
         consultation_line = add_patient_account_line(patient_id, "consultation", "Consultation medicale", consultation_fee, "consultation", result.data[0].get("id"))
-    supabase.table("patient_queue").update({"status": "completed", "updated_at": now_iso()}).eq("patient_id", patient_id).in_("status", ["assigned", "in_consultation", "vitals_done"]).execute()
+    supabase.table("patient_queue").update({"status": "completed", "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
     current_patient = supabase.table(TABLES["patients"]).select("status").eq("id", patient_id).execute().data or []
     if not current_patient or current_patient[0].get("status") not in ("admitted", "discharged"):
         supabase.table(TABLES["patients"]).update({"status": "active", "updated_at": now_iso()}).eq("id", patient_id).execute()
