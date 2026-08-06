@@ -23,44 +23,12 @@ from supabase import create_client, Client
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ==================== CACHE CONFIGURATION ====================
-REDIS_URL = os.getenv("REDIS_URL", "")
-MEMCACHED_URL = os.getenv("MEMCACHED_URL", "")
-CACHE_TYPE = os.getenv("CACHE_TYPE", "SimpleCache")
-
-# Priorité: Redis > Memcached > SimpleCache
-if REDIS_URL:
-    try:
-        import redis
-        redis_client = redis.from_url(REDIS_URL)
-        redis_client.ping()
-        print(f"✅ Redis connecté sur {REDIS_URL}")
-        CACHE_TYPE = "RedisCache"
-        CACHE_REDIS_URL = REDIS_URL
-    except Exception as e:
-        print(f"⚠️ Redis indisponible: {e}")
-        CACHE_TYPE = "SimpleCache"
-elif MEMCACHED_URL:
-    try:
-        import memcache
-        mc = memcache.Client([MEMCACHED_URL])
-        mc.set("test", "ok")
-        mc.get("test")
-        print(f"✅ Memcached connecté sur {MEMCACHED_URL}")
-        CACHE_TYPE = "MemcachedCache"
-        CACHE_MEMCACHED_SERVERS = [MEMCACHED_URL]
-    except Exception as e:
-        print(f"⚠️ Memcached indisponible: {e}, utilisation SimpleCache")
-        CACHE_TYPE = "SimpleCache"
-else:
-    print("ℹ️ Aucun cache externe configuré, utilisation SimpleCache")
-    CACHE_TYPE = "SimpleCache"
+CACHE_TYPE = "SimpleCache"
 
 # ==================== CONFIGURATION ====================
 SUPABASE_URL = "https://figmeixteescztmmprmi.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpZ21laXh0ZWVzY3p0bW1wcm1pIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTM4NjA2MCwiZXhwIjoyMDkwOTYyMDYwfQ.zMIDYvm-Bwv0EUQzME3nZR8ZPoSwTMCaybHRnw_-7Ew"
 SECRET_KEY = os.getenv("SECRET_KEY", "ihub_super_secret_key_2024")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 HOST = "0.0.0.0"
 PORT = 10000
 DEBUG = True
@@ -73,8 +41,6 @@ BASE_URL = os.getenv("RENDER_URL", os.getenv("PUBLIC_URL", f"http://localhost:{P
 app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
 app.config["CACHE_TYPE"] = CACHE_TYPE
-app.config["CACHE_REDIS_URL"] = REDIS_URL if REDIS_URL else None
-app.config["CACHE_MEMCACHED_SERVERS"] = [MEMCACHED_URL] if MEMCACHED_URL else []
 app.config["CACHE_DEFAULT_TIMEOUT"] = CACHE_TIMEOUT
 app.config["JSON_AS_ASCII"] = False
 
@@ -3968,90 +3934,7 @@ def create_growth_measurement():
     return jsonify(result.data[0]), 201
 
 # ==================== AI ROUTES ====================
-AI_DISCLAIMER = "Assistant médical uniquement: validation clinique obligatoire par un professionnel habilité."
-
-def groq_chat(system_prompt: str, user_prompt: str) -> str:
-    api_key = str(GROQ_API_KEY or "").strip()
-    if not api_key:
-        return "IA non configuree: ajoute une cle Groq valide dans app.py, puis redeploie le service."
-    if isinstance(GROQ_MODEL, tuple):
-        actual_model = GROQ_MODEL[0] if len(GROQ_MODEL) > 0 else "llama-3.1-8b-instant"
-    else:
-        actual_model = str(GROQ_MODEL or "llama-3.1-8b-instant").strip()
-    payload = json.dumps({
-        "model": actual_model,
-        "messages": [
-            {"role": "system", "content": f"{system_prompt}\n{AI_DISCLAIMER}"},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.2,
-        "max_tokens": 900
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/chat/completions",
-        data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=25) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as exc:
-        try:
-            details = exc.read().decode("utf-8", errors="ignore")[:300]
-        except Exception:
-            details = str(exc)
-        if exc.code in (401, 403):
-            return f"IA non autorisee: la cle Groq dans app.py est invalide, expiree, supprimee ou sans acces API. HTTP {exc.code}. {details}"
-        if exc.code == 404:
-            return f"Modele IA introuvable: verifie GROQ_MODEL='{actual_model}'. HTTP 404. {details}"
-        return f"IA indisponible: Groq a retourne HTTP {exc.code}. {details}"
-    except urllib.error.URLError as exc:
-        return f"IA indisponible: impossible de joindre Groq ({exc.reason})."
-    except Exception as exc:
-        return f"IA indisponible temporairement: {exc}"
-
-def ai_payload(key: str, value: str):
-    return jsonify({key: value, "disclaimer": AI_DISCLAIMER})
-
-@app.route("/api/ai/health", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def ai_health():
-    configured = bool(GROQ_API_KEY and str(GROQ_API_KEY).startswith("gsk_"))
-    if not configured:
-        return jsonify({"ok": False, "model": GROQ_MODEL, "message": "Cle Groq absente ou invalide dans app.py"}), 500
-    answer = groq_chat("Reponds uniquement par OK.", "Test de connexion IA.")
-    ok = answer.strip().lower().startswith("ok")
-    return jsonify({"ok": ok, "model": str(GROQ_MODEL), "message": answer}), 200 if ok else 502
-
-@app.route("/api/ai/patient-summary", methods=["POST"])
-@roles_required("super_admin", "docteur")
-def ai_patient_summary():
-    data = fast_json()
-    patient_id = to_int(data.get("patient_id"))
-    patient_result = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
-    if not patient_result.data:
-        return jsonify({"error": "Patient introuvable"}), 404
-    patient = filter_patients_for_role(patient_result.data)
-    if not patient:
-        return jsonify({"error": "Accès patient interdit pour ce rôle"}), 403
-    summary = groq_chat("Résume un dossier patient de façon structurée et prudente, sans diagnostic final.", json.dumps(patient[0], ensure_ascii=False))
-    return ai_payload("summary", summary)
-
-@app.route("/api/ai/clinical-decision", methods=["POST"])
-@roles_required("super_admin", "docteur")
-def ai_clinical_decision():
-    context = fast_json().get("context", "")
-    analysis = groq_chat("Aide à l'orientation clinique. Donne priorités, signes d'alerte, examens utiles et limites. Ne pose pas de diagnostic final.", context)
-    return ai_payload("analysis", analysis)
-
-@app.route("/api/ai/hospital-flow", methods=["POST"])
-@roles_required(*ROLES["staff"])
-def ai_hospital_flow():
-    data = fast_json()
-    prediction = groq_chat("Prédis l'affluence hospitalière à court terme et propose des recommandations opérationnelles.", json.dumps(data, ensure_ascii=False)[:12000])
-    return ai_payload("prediction", prediction)
+# IA désactivée - routes vides ou désactivées
 
 # ==================== RAPPORTS ====================
 @app.route("/api/reports/patients", methods=["GET"])
@@ -4341,10 +4224,8 @@ import requests
 
 def auto_ping():
     """Ping l'application toutes les 12 minutes pour éviter l'endormissement"""
-    # Utiliser l'URL publique si disponible
     ping_url = f"{BASE_URL}/api/health"
     if "localhost" in ping_url or "127.0.0.1" in ping_url:
-        # En développement, utiliser localhost
         ping_url = f"http://localhost:{PORT}/api/health"
     
     retry_count = 0
@@ -4354,28 +4235,20 @@ def auto_ping():
         try:
             response = requests.get(ping_url, timeout=10)
             if response.status_code == 200:
-                print(f"[AUTO-PING] ✅ Ping réussi à {ping_url} - {datetime.now().strftime('%H:%M:%S')}")
-                retry_count = 0  # Réinitialiser le compteur
+                print(f"[AUTO-PING] ✅ Ping réussi à {ping_url}")
+                retry_count = 0
             else:
                 print(f"[AUTO-PING] ⚠️ Réponse inattendue: {response.status_code}")
                 retry_count += 1
-        except requests.exceptions.Timeout:
-            print(f"[AUTO-PING] ⏰ Timeout sur {ping_url}")
-            retry_count += 1
-        except requests.exceptions.ConnectionError:
-            print(f"[AUTO-PING] ❌ Connexion impossible à {ping_url}")
-            retry_count += 1
         except Exception as e:
             print(f"[AUTO-PING] ❌ Erreur: {e}")
             retry_count += 1
         
-        # Si trop d'erreurs, attendre plus longtemps
         if retry_count >= max_retries:
             print(f"[AUTO-PING] 🔄 Trop d'échecs, nouvelle tentative dans 60s...")
             time.sleep(60)
             retry_count = 0
         else:
-            # 720 secondes = 12 minutes
             time.sleep(720)
 
 def ping_supabase():
@@ -4384,10 +4257,9 @@ def ping_supabase():
         try:
             result = supabase.table(TABLES["users"]).select("id").limit(1).execute()
             if result.data is not None:
-                print(f"[SUPABASE-PING] ✅ Connexion Supabase OK - {datetime.now().strftime('%H:%M:%S')}")
+                print(f"[SUPABASE-PING] ✅ Connexion Supabase OK")
         except Exception as e:
             print(f"[SUPABASE-PING] ❌ Erreur: {e}")
-        # 720 secondes = 12 minutes
         time.sleep(720)
 
 # ==================== SEED ====================
@@ -4458,7 +4330,6 @@ def init_medical_boxes_table():
     except Exception:
         print(" Table medical_boxes à créer")
         try:
-            # Créer les 3 boxes par défaut
             for i in range(1, 4):
                 supabase.table("medical_boxes").insert({
                     "box_number": str(i),
@@ -4520,7 +4391,6 @@ if __name__ == "__main__":
     print(f" URL de base: {BASE_URL}")
     print("=" * 50)
     
-    # Seed et initialisation
     seed_admin()
     init_workflow_tables()
     init_maternity_tables()
@@ -4529,12 +4399,10 @@ if __name__ == "__main__":
     init_hospitalization_followups_table()
     init_notifications_table()
     
-    # Démarrer l'auto-ping dans un thread daemon
     ping_thread = threading.Thread(target=auto_ping, daemon=True)
     ping_thread.start()
     print("✅ Auto-ping démarré (toutes les 12 minutes)")
     
-    # Démarrer le ping Supabase dans un autre thread
     supabase_ping_thread = threading.Thread(target=ping_supabase, daemon=True)
     supabase_ping_thread.start()
     print("✅ Supabase-ping démarré (toutes les 12 minutes)")
