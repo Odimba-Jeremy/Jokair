@@ -3939,7 +3939,7 @@ def get_deliveries():
     return jsonify(deliveries)
 
 @app.route("/api/maternity/deliveries", methods=["POST"])
-@roles_required("super_admin", "docteur")
+@roles_required("super_admin", "docteur","Infirmier")
 def create_delivery():
     data = fast_json()
     if not data.get("patient_id") or not data.get("delivery_date"):
