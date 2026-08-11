@@ -123,6 +123,7 @@ ROLES = {
 }
 
 # ==================== GRILLE TARIFAIRE ====================
+# Pour compatibilité, mais facture_auto utilise la base
 TARIFS = {
     "CONSULT": {"label": "Consultation médicale générale", "price_usd": 15, "category": "Consultation"},
     "URGENCE": {"label": "Consultation d'urgence", "price_usd": 20, "category": "Consultation"},
@@ -203,7 +204,7 @@ def compatible_insert(table_name: str, data: dict):
         try:
             result = supabase.table(table_name).insert(payload).execute()
             if removed_columns:
-                print(f"⚠️ Colonnes ignorees pour {table_name}: {', '.join(removed_columns)}")
+                print(f" Colonnes ignorees pour {table_name}: {', '.join(removed_columns)}")
             return result
         except Exception as exc:
             column = missing_schema_column(exc)
@@ -219,7 +220,7 @@ def compatible_update(table_name: str, data: dict, field: str, value: Any):
         try:
             result = supabase.table(table_name).update(payload).eq(field, value).execute()
             if removed_columns:
-                print(f"⚠️ Colonnes ignorees pour {table_name}: {', '.join(removed_columns)}")
+                print(f" Colonnes ignorees pour {table_name}: {', '.join(removed_columns)}")
             return result
         except Exception as exc:
             column = missing_schema_column(exc)
@@ -1492,75 +1493,6 @@ def delete_care_log(care_id: int):
     invalidate_cache()
     return jsonify({"message": "Soin supprimé"})
 
-# ==================== ROUTES MANQUANTES - CARE ====================
-@app.route("/api/care/pending", methods=["GET"])
-@roles_required(*ROLES["staff"])
-@cached(30)
-def get_pending_care():
-    """Récupère les soins en attente"""
-    try:
-        result = supabase.table(TABLES["care"]).select("*")\
-            .in_("status", ["pending", "scheduled"])\
-            .order("date", desc=True).execute()
-        
-        care_logs = result.data or []
-        
-        patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
-        patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
-        
-        for c in care_logs:
-            c["patient_name"] = patient_map.get(c.get("patient_id"), "Inconnu")
-            c["status_label"] = {
-                "pending": "En attente",
-                "scheduled": "Planifié"
-            }.get(c.get("status"), c.get("status", "Inconnu"))
-        
-        return jsonify(care_logs)
-    except Exception as e:
-        app.logger.error(f"Erreur get_pending_care: {e}")
-        return jsonify([])
-
-@app.route("/api/care/history", methods=["GET"])
-@roles_required(*ROLES["staff"])
-@cached(60)
-def get_care_history():
-    """Récupère l'historique des soins"""
-    try:
-        patient_id = request.args.get("patient_id")
-        limit = min(max(to_int(request.args.get("limit"), 100), 1), 500)
-        offset = to_int(request.args.get("offset"), 0)
-        
-        query = supabase.table(TABLES["care"]).select("*")
-        
-        if patient_id:
-            query = query.eq("patient_id", to_int(patient_id))
-        
-        query = query.neq("status", "pending")
-        
-        result = query.order("date", desc=True).limit(limit).offset(offset).execute()
-        care_logs = result.data or []
-        
-        patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
-        patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
-        
-        for c in care_logs:
-            c["patient_name"] = patient_map.get(c.get("patient_id"), "Inconnu")
-            c["status_label"] = {
-                "completed": "Terminé",
-                "in_progress": "En cours",
-                "cancelled": "Annulé"
-            }.get(c.get("status"), c.get("status", "Inconnu"))
-        
-        return jsonify({
-            "data": care_logs,
-            "total": len(care_logs),
-            "limit": limit,
-            "offset": offset
-        })
-    except Exception as e:
-        app.logger.error(f"Erreur get_care_history: {e}")
-        return jsonify({"data": [], "total": 0})
-
 # ==================== WORKFLOW ====================
 @app.route("/api/workflow/doctors", methods=["GET"])
 @roles_required("super_admin", "infirmier", "reception", "docteur")
@@ -1761,7 +1693,7 @@ def flag_pregnancy_from_nurse():
 def dispatch_patient():
     data = fast_json()
     patient_id = to_int(data.get("patient_id"))
-    doctor_id = to_int(data.get("doctor_id"))
+    doctor_id = data.get("doctor_id")
     box_id = data.get("box_id")
     if not patient_id or not doctor_id:
         return jsonify({"error": "Patient et medecin requis"}), 422
@@ -1769,12 +1701,13 @@ def dispatch_patient():
     if not latest_vitals.data:
         return jsonify({"error": "Les signes vitaux doivent etre preleves avant le dispatch"}), 422
     doctors = get_user_map()
-    doctor = doctors.get(doctor_id)
+    doctor = doctors.get(str(doctor_id))
     current_queue = supabase.table("patient_queue").select("assigned_doctor_id").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
     previous_doctor_id = data.get("previous_doctor_id")
     if not previous_doctor_id and current_queue:
         previous_doctor_id = current_queue[0].get("assigned_doctor_id")
     
+    # Si box_id fourni, occuper le box
     if box_id:
         box_check = supabase.table("medical_boxes").select("status,doctor_id").eq("id", to_int(box_id)).execute()
         if box_check.data and box_check.data[0].get("status") == "free":
@@ -2349,6 +2282,19 @@ def get_medical_boxes():
         print(f"Erreur récupération box: {e}")
         return jsonify([])
 
+@app.route("/api/medical/boxes/<int:box_id>", methods=["GET"])
+@roles_required("super_admin", "infirmier", "docteur", "reception")
+@cached(timeout=30)
+def get_medical_box(box_id: int):
+    try:
+        result = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
+        if not result.data:
+            return jsonify({"error": "Box introuvable"}), 404
+        return jsonify(result.data[0])
+    except Exception as e:
+        print(f"Erreur récupération box {box_id}: {e}")
+        return jsonify({"error": "Box introuvable"}), 404
+
 @app.route("/api/medical/boxes", methods=["POST"])
 @roles_required("super_admin", "infirmier")
 def create_medical_box():
@@ -2356,6 +2302,7 @@ def create_medical_box():
     if not data.get("box_number"):
         return jsonify({"error": "Numéro de box requis"}), 422
     
+    # Vérifier le nombre maximum de box
     try:
         count_result = supabase.table("medical_boxes").select("id", count="exact").execute()
         current_count = len(count_result.data) if count_result.data else 0
@@ -2378,81 +2325,6 @@ def create_medical_box():
     add_audit("CREATE", "medical_box", f"Box {data['box_number']} créé", result.data[0]["id"])
     invalidate_cache()
     return jsonify(result.data[0]), 201
-
-# ==================== ROUTES MANQUANTES - MEDICAL BOXES ====================
-@app.route("/api/medical/boxes/<int:box_id>", methods=["GET"])
-@roles_required("super_admin", "infirmier", "docteur", "reception")
-def get_medical_box(box_id: int):
-    """Récupère les détails d'un box spécifique"""
-    try:
-        result = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
-        if not result.data:
-            return jsonify({"error": "Box introuvable"}), 404
-        
-        box = result.data[0]
-        
-        if box.get("doctor_id"):
-            doctor = supabase.table(TABLES["users"]).select("name").eq("id", box["doctor_id"]).execute()
-            if doctor.data:
-                box["doctor_name"] = doctor.data[0]["name"]
-        
-        if box.get("patient_id"):
-            patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", box["patient_id"]).execute()
-            if patient.data:
-                box["patient_name"] = patient.data[0]["full_name"]
-        
-        return jsonify(box)
-    except Exception as e:
-        app.logger.error(f"Erreur get_medical_box: {e}")
-        return jsonify({"error": "Erreur lors de la récupération du box"}), 500
-
-@app.route("/api/medical/boxes/<int:box_id>", methods=["PUT"])
-@roles_required("super_admin", "infirmier")
-def update_medical_box(box_id: int):
-    """Met à jour un box existant"""
-    data = fast_json()
-    
-    existing = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
-    if not existing.data:
-        return jsonify({"error": "Box introuvable"}), 404
-    
-    allowed = ["box_number", "status", "doctor_id", "doctor_name", "patient_id", "patient_name"]
-    updates = {k: v for k, v in data.items() if k in allowed and v is not None}
-    
-    if not updates:
-        return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
-    
-    updates["updated_at"] = now_iso()
-    
-    try:
-        result = supabase.table("medical_boxes").update(updates).eq("id", box_id).execute()
-        if not result.data:
-            return jsonify({"error": "Box introuvable"}), 404
-        
-        add_audit("UPDATE", "medical_box", f"Box #{box_id} modifié", box_id)
-        invalidate_cache()
-        return jsonify(result.data[0])
-    except Exception as e:
-        app.logger.error(f"Erreur update_medical_box: {e}")
-        return jsonify({"error": "Erreur lors de la mise à jour du box"}), 500
-
-@app.route("/api/medical/boxes/<int:box_id>", methods=["DELETE"])
-@roles_required("super_admin")
-def delete_medical_box(box_id: int):
-    """Supprime un box"""
-    try:
-        existing = supabase.table("medical_boxes").select("*").eq("id", box_id).execute()
-        if not existing.data:
-            return jsonify({"error": "Box introuvable"}), 404
-        
-        supabase.table("medical_boxes").delete().eq("id", box_id).execute()
-        
-        add_audit("DELETE", "medical_box", f"Box #{box_id} supprimé", box_id)
-        invalidate_cache()
-        return jsonify({"message": "Box supprimé avec succès"})
-    except Exception as e:
-        app.logger.error(f"Erreur delete_medical_box: {e}")
-        return jsonify({"error": "Erreur lors de la suppression du box"}), 500
 
 @app.route("/api/medical/boxes/<int:box_id>/assign", methods=["PUT"])
 @roles_required("super_admin", "infirmier")
@@ -2522,131 +2394,6 @@ def occupy_medical_box(box_id: int):
     }).eq("id", box_id).execute()
     
     add_audit("UPDATE", "medical_box", f"Box #{box_id} occupé par patient #{patient_id}", box_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-# ==================== ROUTES MANQUANTES - HOSPITALIZATION ROOMS ====================
-@app.route("/api/hospitalization/rooms", methods=["GET"])
-@roles_required(*ROLES["staff"])
-@cached(60)
-def get_hospitalization_rooms():
-    """Récupère toutes les chambres d'hospitalisation"""
-    try:
-        result = supabase.table("hospitalization_rooms").select("*").order("room_number").execute()
-        rooms = result.data or []
-        
-        if not rooms:
-            default_rooms = [
-                {"room_number": "H-101", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-102", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-103", "type": "Privée", "status": "available", "capacity": 1},
-                {"room_number": "H-104", "type": "Standard", "status": "available", "capacity": 3},
-                {"room_number": "H-201", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-202", "type": "Privée", "status": "available", "capacity": 1},
-            ]
-            return jsonify(default_rooms)
-        
-        for room in rooms:
-            if room.get("status") == "occupied" and room.get("patient_id"):
-                patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", room["patient_id"]).execute()
-                if patient.data:
-                    room["patient_name"] = patient.data[0]["full_name"]
-        
-        return jsonify(rooms)
-    except Exception as e:
-        app.logger.error(f"Erreur get_hospitalization_rooms: {e}")
-        return jsonify([
-            {"id": 1, "room_number": "H-101", "type": "Standard", "status": "available", "capacity": 2},
-            {"id": 2, "room_number": "H-102", "type": "Standard", "status": "available", "capacity": 2},
-            {"id": 3, "room_number": "H-103", "type": "Privée", "status": "available", "capacity": 1},
-        ])
-
-@app.route("/api/hospitalization/rooms/<int:room_id>", methods=["GET"])
-@roles_required(*ROLES["staff"])
-def get_hospitalization_room(room_id: int):
-    """Récupère les détails d'une chambre spécifique"""
-    try:
-        result = supabase.table("hospitalization_rooms").select("*").eq("id", room_id).execute()
-        if result.data:
-            room = result.data[0]
-            if room.get("status") == "occupied" and room.get("patient_id"):
-                patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", room["patient_id"]).execute()
-                if patient.data:
-                    room["patient_name"] = patient.data[0]["full_name"]
-            return jsonify(room)
-        return jsonify({"error": "Chambre introuvable"}), 404
-    except Exception:
-        return jsonify({"error": "Chambre introuvable"}), 404
-
-@app.route("/api/hospitalization/rooms", methods=["POST"])
-@roles_required("super_admin", "infirmier")
-def create_hospitalization_room():
-    """Crée une nouvelle chambre d'hospitalisation"""
-    data = fast_json()
-    if not data.get("room_number"):
-        return jsonify({"error": "Numéro de chambre requis"}), 422
-    
-    room = {
-        "room_number": data.get("room_number"),
-        "type": data.get("type", "Standard"),
-        "status": "available",
-        "capacity": data.get("capacity", 2),
-        "floor": data.get("floor"),
-        "wing": data.get("wing"),
-        "created_at": now_iso(),
-        "updated_at": now_iso()
-    }
-    
-    result = compatible_insert("hospitalization_rooms", room)
-    add_audit("CREATE", "hospitalization_room", f"Chambre {data['room_number']} créée", result.data[0]["id"])
-    invalidate_cache()
-    return jsonify(result.data[0]), 201
-
-@app.route("/api/hospitalization/rooms/<int:room_id>/occupy", methods=["POST"])
-@roles_required("super_admin", "infirmier")
-def occupy_hospitalization_room(room_id: int):
-    """Occupe une chambre avec un patient"""
-    data = fast_json()
-    patient_id = data.get("patient_id")
-    if not patient_id:
-        return jsonify({"error": "Patient requis"}), 422
-    
-    room = supabase.table("hospitalization_rooms").select("*").eq("id", room_id).execute()
-    if not room.data:
-        return jsonify({"error": "Chambre introuvable"}), 404
-    if room.data[0]["status"] != "available":
-        return jsonify({"error": "Chambre déjà occupée"}), 422
-    
-    patient = supabase.table(TABLES["patients"]).select("full_name").eq("id", patient_id).execute()
-    patient_name = patient.data[0]["full_name"] if patient.data else "Patient"
-    
-    updates = {
-        "status": "occupied",
-        "patient_id": to_int(patient_id),
-        "patient_name": patient_name,
-        "admission_date": now_iso(),
-        "updated_at": now_iso()
-    }
-    result = supabase.table("hospitalization_rooms").update(updates).eq("id", room_id).execute()
-    add_audit("UPDATE", "hospitalization_room", f"Chambre #{room_id} occupée par patient #{patient_id}", room_id)
-    invalidate_cache()
-    return jsonify(result.data[0])
-
-@app.route("/api/hospitalization/rooms/<int:room_id>/free", methods=["POST"])
-@roles_required("super_admin", "infirmier")
-def free_hospitalization_room(room_id: int):
-    """Libère une chambre"""
-    updates = {
-        "status": "available",
-        "patient_id": None,
-        "patient_name": None,
-        "discharge_date": now_iso(),
-        "updated_at": now_iso()
-    }
-    result = supabase.table("hospitalization_rooms").update(updates).eq("id", room_id).execute()
-    if not result.data:
-        return jsonify({"error": "Chambre introuvable"}), 404
-    add_audit("UPDATE", "hospitalization_room", f"Chambre #{room_id} libérée", room_id)
     invalidate_cache()
     return jsonify(result.data[0])
 
@@ -4369,7 +4116,7 @@ def seed_admin():
             "created_at": now_iso(),
             "updated_at": now_iso()
         }).execute()
-        print("✅ Super admin créé (email: jeremyodimba322@gmail.com, mot de passe: admin123)")
+        print(" Super admin créé (email: jeremyodimba322@gmail.com, mot de passe: admin123)")
 
 # ==================== INITIALISATION TABLES ====================
 def init_workflow_tables():
@@ -4382,9 +4129,9 @@ def init_workflow_tables():
     for table in tables:
         try:
             supabase.table(table).select("*").limit(1).execute()
-            print(f"✅ Table {table} existe déjà")
+            print(f" Table {table} existe déjà")
         except Exception as e:
-            print(f"⚠️ Table {table} à créer: {str(e)[:100]}")
+            print(f" Table {table} à créer: {str(e)[:100]}")
 
 def init_maternity_tables():
     tables = [
@@ -4394,16 +4141,16 @@ def init_maternity_tables():
     for table in tables:
         try:
             supabase.table(table).select("*").limit(1).execute()
-            print(f"✅ Table {table} existe déjà")
+            print(f" Table {table} existe déjà")
         except Exception as e:
-            print(f"⚠️ Table {table} à créer: {str(e)[:100]}")
+            print(f" Table {table} à créer: {str(e)[:100]}")
 
 def init_exchange_rate_table():
     try:
         supabase.table("exchange_rates").select("*").limit(1).execute()
-        print("✅ Table exchange_rates existe déjà")
+        print(" Table exchange_rates existe déjà")
     except Exception:
-        print("⚠️ Table exchange_rates à créer")
+        print(" Table exchange_rates à créer")
         try:
             supabase.table("exchange_rates").insert({
                 "rate": 2800,
@@ -4413,16 +4160,16 @@ def init_exchange_rate_table():
                 "set_by_name": "Systeme",
                 "created_at": now_iso()
             }).execute()
-            print("✅ Table exchange_rates créée avec taux par défaut 2800")
+            print(" Table exchange_rates créée avec taux par défaut 2800")
         except Exception as e:
-            print(f"❌ Impossible de créer exchange_rates: {e}")
+            print(f" Impossible de créer exchange_rates: {e}")
 
 def init_medical_boxes_table():
     try:
         supabase.table("medical_boxes").select("*").limit(1).execute()
-        print("✅ Table medical_boxes existe déjà")
+        print(" Table medical_boxes existe déjà")
     except Exception:
-        print("⚠️ Table medical_boxes à créer")
+        print(" Table medical_boxes à créer")
         try:
             supabase.table("medical_boxes").insert({
                 "box_number": "1",
@@ -4431,16 +4178,16 @@ def init_medical_boxes_table():
                 "updated_at": now_iso()
             }).execute()
             supabase.table("medical_boxes").delete().eq("box_number", "1").execute()
-            print("✅ Table medical_boxes créée")
+            print(" Table medical_boxes créée")
         except Exception as e:
-            print(f"❌ Impossible de créer medical_boxes: {e}")
+            print(f" Impossible de créer medical_boxes: {e}")
 
 def init_hospitalization_followups_table():
     try:
         supabase.table("hospitalization_followups").select("*").limit(1).execute()
-        print("✅ Table hospitalization_followups existe déjà")
+        print(" Table hospitalization_followups existe déjà")
     except Exception:
-        print("⚠️ Table hospitalization_followups à créer")
+        print(" Table hospitalization_followups à créer")
         try:
             supabase.table("hospitalization_followups").insert({
                 "patient_id": 1,
@@ -4451,45 +4198,23 @@ def init_hospitalization_followups_table():
                 "created_at": now_iso()
             }).execute()
             supabase.table("hospitalization_followups").delete().eq("patient_id", 1).execute()
-            print("✅ Table hospitalization_followups créée")
+            print(" Table hospitalization_followups créée")
         except Exception as e:
-            print(f"❌ Impossible de créer hospitalization_followups: {e}")
-
-def init_hospitalization_rooms_table():
-    try:
-        supabase.table("hospitalization_rooms").select("*").limit(1).execute()
-        print("✅ Table hospitalization_rooms existe déjà")
-    except Exception:
-        print("⚠️ Table hospitalization_rooms à créer")
-        try:
-            default_rooms = [
-                {"room_number": "H-101", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-102", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-103", "type": "Privée", "status": "available", "capacity": 1},
-                {"room_number": "H-104", "type": "Standard", "status": "available", "capacity": 3},
-                {"room_number": "H-201", "type": "Standard", "status": "available", "capacity": 2},
-                {"room_number": "H-202", "type": "Privée", "status": "available", "capacity": 1},
-            ]
-            for room in default_rooms:
-                supabase.table("hospitalization_rooms").insert(room).execute()
-            print("✅ Table hospitalization_rooms créée avec chambres par défaut")
-        except Exception as e:
-            print(f"❌ Impossible de créer hospitalization_rooms: {e}")
+            print(f" Impossible de créer hospitalization_followups: {e}")
 
 # ==================== LANCEMENT ====================
 if __name__ == "__main__":
     print("=" * 50)
-    print("🏥 I HUB HOSPITAL API - VERSION COMPLÈTE")
+    print(" I HUB HOSPITAL API - VERSION COMPLÈTE AVEC REDIS")
     print("=" * 50)
-    print(f"📦 Cache: {CACHE_TYPE}")
-    print(f"📦 Box maximum: {MAX_BOXES}")
+    print(f" Cache: {CACHE_TYPE}")
+    print(f" Box maximum: {MAX_BOXES}")
     seed_admin()
     init_workflow_tables()
     init_maternity_tables()
     init_exchange_rate_table()
     init_medical_boxes_table()
     init_hospitalization_followups_table()
-    init_hospitalization_rooms_table()
-    print(f"🚀 Serveur démarré sur http://{HOST}:{PORT}")
+    print(f" Serveur démarré sur http://{HOST}:{PORT}")
     print("=" * 50)
     app.run(host=HOST, port=PORT, debug=DEBUG, threaded=True)
