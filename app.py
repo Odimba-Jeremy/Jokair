@@ -2131,8 +2131,39 @@ def create_final_invoice_from_account():
     invalidate_cache()
     return jsonify({"invoice": created_invoice}), 201
 
+@app.route("/api/hospitalization/rooms", methods=["GET", "POST"])
+@roles_required("super_admin", "infirmier", "docteur", "reception")
+def hospitalization_rooms():
+    if request.method == "GET":
+        rows = supabase.table("hospitalization_rooms").select("*").order("room_number").execute().data or []
+        for row in rows:
+            total = max(1, to_int(row.get("total_beds"), 1))
+            occupied = max(0, to_int(row.get("occupied_beds"), 0))
+            row["total_beds"] = total
+            row["occupied_beds"] = occupied
+            row["available_beds"] = max(0, total - occupied)
+            row["status"] = "available" if occupied < total else "occupied"
+        return jsonify(rows)
+    if g.current_user.get("role") not in ("super_admin", "infirmier"):
+        return jsonify({"error": "Droit insuffisant"}), 403
+    data = fast_json()
+    room_number = str(data.get("room_number", "")).strip()
+    if not room_number:
+        return jsonify({"error": "Numéro de chambre requis"}), 422
+    room = compatible_insert("hospitalization_rooms", {
+        "room_number": room_number,
+        "service": data.get("service", "Hospitalisation"),
+        "total_beds": max(1, to_int(data.get("total_beds"), 1)),
+        "occupied_beds": 0,
+        "status": "available",
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    })
+    invalidate_cache()
+    return jsonify(room.data[0]), 201
+
 @app.route("/api/workflow/hospitalizations", methods=["GET", "POST"])
-@roles_required("super_admin", "infirmier", "docteur")
+@roles_required("super_admin", "infirmier", "docteur", "reception")
 def workflow_hospitalizations():
     if request.method == "GET":
         patient_id = request.args.get("patient_id")
@@ -2144,20 +2175,43 @@ def workflow_hospitalizations():
         for row in rows:
             row["patient_name"] = patients.get(row.get("patient_id"), "Inconnu")
         return jsonify(rows)
+    if g.current_user.get("role") == "reception":
+        return jsonify({"error": "La réception peut uniquement consulter les hospitalisations"}), 403
     data = fast_json()
     patient_id = to_int(data.get("patient_id"))
     if not patient_id:
         return jsonify({"error": "Patient requis"}), 422
+    role = g.current_user.get("role")
+    requested_status = data.get("status")
+    # Un médecin formule une demande : seul l'infirmier (ou l'admin) peut admettre.
+    status = "pending" if role == "docteur" else ("admitted" if requested_status in ("admitted", "hospitalized") else "pending")
+    if status == "admitted" and not data.get("room_id"):
+        return jsonify({"error": "Une chambre est requise pour admettre le patient"}), 422
+    if status == "admitted":
+        room_id = to_int(data.get("room_id"))
+        room_result = supabase.table("hospitalization_rooms").select("*").eq("id", room_id).execute()
+        if not room_result.data:
+            return jsonify({"error": "Chambre introuvable"}), 404
+        room = room_result.data[0]
+        if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
+            return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
+        supabase.table("hospitalization_rooms").update({
+            "occupied_beds": to_int(room.get("occupied_beds"), 0) + 1,
+            "status": "occupied",
+            "updated_at": now_iso()
+        }).eq("id", room_id).execute()
     payload = {
         "patient_id": patient_id,
-        "admission_date": data.get("admission_date") or now_iso(),
+        "admission_date": (data.get("admission_date") or now_iso()) if status == "admitted" else None,
         "discharge_date": data.get("discharge_date"),
-        "status": "hospitalized",
+        "status": status,
         "reason": data.get("reason", ""),
         "room": data.get("room", ""),
-        "bed": data.get("bed", ""),
+        "bed": data.get("bed") or data.get("bed_id", ""),
+        "bed_id": data.get("bed_id") or data.get("bed", ""),
         "room_id": data.get("room_id"),
-        "doctor_name": data.get("doctor_name", ""),
+        "doctor_id": data.get("doctor_id") or (g.current_user["id"] if role == "docteur" else None),
+        "doctor_name": data.get("doctor_name", "") or (g.current_user["name"] if role == "docteur" else ""),
         "daily_rate": to_float(data.get("daily_rate"), get_tariff_amount("hospitalisation", "Hospitalisation", 0)),
         "created_by": g.current_user["id"],
         "created_by_name": g.current_user["name"],
@@ -2165,8 +2219,9 @@ def workflow_hospitalizations():
         "updated_at": now_iso()
     }
     result = compatible_insert("hospitalizations", payload)
-    supabase.table(TABLES["patients"]).update({"status": "admitted", "updated_at": now_iso()}).eq("id", patient_id).execute()
-    add_audit("CREATE", "hospitalization", f"Admission patient #{patient_id}", patient_id)
+    if status == "admitted":
+        supabase.table(TABLES["patients"]).update({"status": "admitted", "updated_at": now_iso()}).eq("id", patient_id).execute()
+    add_audit("CREATE", "hospitalization", f"{'Admission' if status == 'admitted' else 'Demande d’hospitalisation'} patient #{patient_id}", patient_id)
     invalidate_cache()
     return jsonify(result.data[0]), 201
 
@@ -2180,6 +2235,8 @@ def _discharge_workflow_hospitalization(hosp_id: int, data: dict):
     if not hosp.data:
         return jsonify({"error": "Hospitalisation introuvable"}), 404
     row = hosp.data[0]
+    if row.get("status") == "discharged":
+        return jsonify({"error": "Cette hospitalisation est déjà clôturée"}), 422
     discharge_date = data.get("discharge_date") or now_iso()
     start = parse_date(row.get("admission_date")) or datetime.now(timezone.utc).date()
     end = parse_date(discharge_date) or datetime.now(timezone.utc).date()
@@ -2192,6 +2249,17 @@ def _discharge_workflow_hospitalization(hosp_id: int, data: dict):
         amount = days * daily_rate
         add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s)", amount, "hospitalization", hosp_id, days, daily_rate)
         facture_auto(to_int(row.get("patient_id")), "HOSPI_JOUR", days, "hospitalization", hosp_id)
+    room_id = to_int(row.get("room_id"))
+    if room_id:
+        room_result = supabase.table("hospitalization_rooms").select("occupied_beds,total_beds").eq("id", room_id).execute()
+        if room_result.data:
+            room = room_result.data[0]
+            occupied = max(0, to_int(room.get("occupied_beds"), 0) - 1)
+            supabase.table("hospitalization_rooms").update({
+                "occupied_beds": occupied,
+                "status": "available" if occupied < max(1, to_int(room.get("total_beds"), 1)) else "occupied",
+                "updated_at": now_iso()
+            }).eq("id", room_id).execute()
     
     supabase.table(TABLES["patients"]).update({"status": "discharged", "updated_at": now_iso()}).eq("id", row.get("patient_id")).execute()
     add_audit("UPDATE", "hospitalization", f"Sortie hospitalisation #{hosp_id}", hosp_id)
@@ -2206,7 +2274,31 @@ def patch_workflow_hospitalization(hosp_id: int):
         discharge_data = dict(data)
         discharge_data["discharge_date"] = data.get("discharge_date") or data.get("discharged_at") or now_iso()
         return _discharge_workflow_hospitalization(hosp_id, discharge_data)
-    allowed = ("admission_date", "discharge_date", "room", "bed", "room_id", "reason", "doctor_name", "daily_rate", "notes", "status")
+    existing = supabase.table("hospitalizations").select("*").eq("id", hosp_id).execute()
+    if not existing.data:
+        return jsonify({"error": "Hospitalisation introuvable"}), 404
+    current = existing.data[0]
+    if data.get("status") in ("admitted", "hospitalized") and current.get("status") == "pending":
+        if g.current_user.get("role") not in ("super_admin", "infirmier"):
+            return jsonify({"error": "Seul l'infirmier peut accepter une hospitalisation"}), 403
+        room_id = to_int(data.get("room_id"))
+        if not room_id:
+            return jsonify({"error": "Chambre requise pour l'admission"}), 422
+        room_result = supabase.table("hospitalization_rooms").select("*").eq("id", room_id).execute()
+        if not room_result.data:
+            return jsonify({"error": "Chambre introuvable"}), 404
+        room = room_result.data[0]
+        if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
+            return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
+        supabase.table("hospitalization_rooms").update({
+            "occupied_beds": to_int(room.get("occupied_beds"), 0) + 1,
+            "status": "occupied",
+            "updated_at": now_iso()
+        }).eq("id", room_id).execute()
+        data = {**data, "status": "admitted", "admission_date": data.get("admission_date") or now_iso(),
+                "admitted_by": g.current_user["id"], "admitted_by_name": g.current_user["name"]}
+        supabase.table(TABLES["patients"]).update({"status": "admitted", "updated_at": now_iso()}).eq("id", current.get("patient_id")).execute()
+    allowed = ("admission_date", "discharge_date", "room", "bed", "bed_id", "room_id", "reason", "doctor_id", "doctor_name", "daily_rate", "notes", "status", "admitted_by", "admitted_by_name")
     updates = {key: value for key, value in data.items() if key in allowed and value is not None}
     if not updates:
         return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
@@ -2232,7 +2324,7 @@ def delete_workflow_hospitalization(hosp_id: int):
 @app.route("/api/workflow/hospitalizations/patient/<int:patient_id>/discharge", methods=["POST"])
 @roles_required("super_admin", "infirmier", "docteur")
 def discharge_patient_hospitalization_by_id(patient_id: int):
-    hosp = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).eq("status", "hospitalized").execute()
+    hosp = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).in_("status", ["admitted", "hospitalized"]).execute()
     if not hosp.data:
         return jsonify({"error": "Aucune hospitalisation en cours pour ce patient"}), 404
     hosp_id = hosp.data[0]["id"]
