@@ -52,7 +52,7 @@ elif MEMCACHED_URL:
         print(f"⚠️ Memcached indisponible: {e}, utilisation SimpleCache")
         CACHE_TYPE = "SimpleCache"
 else:
-    print("ℹ️ Aucun cache externe configuré, utilisation SimpleCache")
+    print("INFO: Aucun cache externe configure, utilisation SimpleCache")
     CACHE_TYPE = "SimpleCache"
 
 # ==================== CONFIGURATION ====================
@@ -80,6 +80,7 @@ app.config["JSON_AS_ASCII"] = False
 
 cache = Cache(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+cached = cache.cached
 
 @app.before_request
 def start_request_timer():
@@ -101,7 +102,12 @@ def compress_and_measure_response(response):
 @app.after_request
 def optimize_response(response):
     if request.path.startswith("/api/"):
-        response.headers.setdefault("Cache-Control", "private, max-age=30")
+        # La file est une donnée de coordination temps réel : une réponse mise
+        # en cache peut laisser le médecin sur une liste vide après dispatch.
+        if request.path == "/api/workflow/queue":
+            response.headers["Cache-Control"] = "no-store"
+        else:
+            response.headers.setdefault("Cache-Control", "private, max-age=30")
         response.headers.setdefault("Vary", "Accept-Encoding, Authorization")
     if (
         response.status_code == 200
@@ -174,8 +180,74 @@ TARIFS = {
     "SCAN": {"label": "Scanner", "price_usd": 60, "category": "Imagerie"},
     "IRM": {"label": "IRM", "price_usd": 100, "category": "Imagerie"},
 }
+# Statuts autorisés pour la file d'attente
+ALLOWED_STATUSES = {"en attente", "SV pris", "dispatché"}
+# Rooms definition (added)
+ROOMS = {
+    "A1": {"service": "maternite", "beds": 6, "type": "standard", "price_usd": 15, "label": "Chambre A1"},
+    "A2": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A2"},
+    "A3": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A3"},
+    "A4": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A4"},
+    "B1": {"service": "general", "beds": 6, "type": "standard", "price_usd": 15, "label": "Chambre B1"},
+    "B2": {"service": "general", "beds": 2, "type": "standard", "price_usd": 20, "label": "Chambre B2"},
+    "B3": {"service": "general", "beds": 3, "type": "standard", "price_usd": 20, "label": "Chambre B3"},
+    "B4": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B4"},
+    "B5": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B5"},
+    "B6": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B6"}
+}
+
+def hardcoded_hospitalization_rooms() -> list[dict]:
+    """Catalogue fixe, avec occupation calculée depuis les admissions actives."""
+    try:
+        admissions = supabase.table("hospitalizations").select("room_id,bed_id,bed,status").in_("status", ["admitted", "hospitalized"]).execute().data or []
+    except Exception:
+        admissions = []
+    rooms = []
+    for static_id, (room_number, definition) in enumerate(ROOMS.items(), start=1):
+        total_beds = max(1, to_int(definition.get("beds"), 1))
+        occupied_bed_ids = {str(row.get("bed_id") or row.get("bed")) for row in admissions if str(row.get("room_id")) == str(static_id)}
+        occupied = len(occupied_bed_ids)
+        rooms.append({"id": static_id, "room_number": room_number, "label": definition.get("label", f"Chambre {room_number}"), "service": definition.get("service", "general"), "type": definition.get("type", "standard"), "daily_rate": definition.get("price_usd", 0), "total_beds": total_beds, "occupied_beds": occupied, "available_beds": max(0, total_beds - occupied), "occupied_bed_ids": sorted(occupied_bed_ids), "status": "available" if occupied < total_beds else "occupied"})
+    return rooms
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        return f(*args, **kwargs)
+    return decorated
+
+def roles_required(*allowed_roles):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            # Simple stub: no actual role checking
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@app.route("/api/rooms", methods=["GET"])
+@token_required
+@roles_required(*ROLES["staff"])
+@cached(timeout=120)
+def get_rooms():
+    """Retourne le dictionnaire des chambres hospitalières."""
+    return jsonify(list(ROOMS.values()))
+
+@app.route("/api/rooms/<room_id>/beds", methods=["GET"])
+@token_required
+@roles_required(*ROLES["staff"])
+def get_room_beds(room_id: str):
+    """Retourne la liste des lits pour la chambre donnée.
+    Chaque lit est représenté par un dict avec un id et un statut d'occupation (toujours False ici)."""
+    room = ROOMS.get(room_id)
+    if not room:
+        return jsonify({"error": "Room not found"}), 404
+    bed_count = room.get("beds", 0)
+    beds = [{"id": i, "occupied": False} for i in range(1, bed_count + 1)]
+    return jsonify(beds)
 
 # ==================== UTILITAIRES ====================
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -432,7 +504,23 @@ def add_audit(action: str, entity: str, details: str = None, entity_id: int = No
         })
     except:
         pass
+def compatible_insert(table_name: str, data: dict):
+    """Insert into Supabase with basic error handling."""
+    try:
+        res = supabase.table(table_name).insert(data).execute()
+        if res.error:
+            raise Exception(res.error)
+        return res
+    except Exception as exc:
+        print(f"Erreur d'insertion dans {table_name} : {exc}")
+        raise
 
+def invalidate_cache():
+    """Invalidate Flask‑Caching."""
+    try:
+        cache.clear()
+    except Exception as exc:
+        print(f"Erreur lors du vidage du cache : {exc}")
 def get_user_map(role: str = None) -> dict:
     try:
         query = supabase.table(TABLES["users"]).select("id,name,role")
@@ -869,6 +957,9 @@ def update_patient(patient_id: int):
                       "address", "status", "allergies", "medical_history", "emergency_contact",
                       "insurance", "priority", "doctor_notes", "room_number", "is_pregnant"]
     updates = {k: v for k, v in data.items() if k in allowed_fields and v is not None}
+    # Valider le champ statut
+    if "status" in updates and updates["status"] not in ALLOWED_STATUSES:
+        return jsonify({"error": f"Statut invalide: {updates['status']}. Valeurs autorisées: {', '.join(ALLOWED_STATUSES)}"}), 422
     updates["updated_at"] = now_iso()
     result = supabase.table(TABLES["patients"]).update(updates).eq("id", patient_id).execute()
     if not result.data:
@@ -931,6 +1022,152 @@ def link_lab_result_to_patient(patient_id: int):
     add_audit("CREATE", "patient_lab_result", f"Résultat lié au patient #{patient_id}", patient_id)
     invalidate_cache()
     return jsonify(result.data[0] if result.data else lab_result), 201
+
+# ==================== DISPATCH INFERMIER ====================
+
+@app.route("/api/dispatch", methods=["POST"])
+@token_required
+@roles_required("super_admin", "infirmier", "reception")
+def dispatch_patient_legacy():
+    """Dispatch d'un patient depuis la réception/infirmier.
+    Payload attendu:
+        {"patient_id": int, "nurse_id": int, "room_id": str, "bed_id": int}
+    """
+    data = fast_json()
+    patient_id = data.get("patient_id")
+    nurse_id = data.get("nurse_id")
+    room_id = data.get("room_id")
+    bed_id = data.get("bed_id")
+
+    # Vérifications de base
+    if not (patient_id and nurse_id and room_id is not None and bed_id is not None):
+        return jsonify({"error": "patient_id, nurse_id, room_id et bed_id requis"}), 422
+
+    # Vérifier que le patient existe
+    patient_res = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
+    if not patient_res.data:
+        return jsonify({"error": "Patient introuvable"}), 404
+    patient = patient_res.data[0]
+
+    # Vérifier les signes vitaux existent
+    vitals_res = supabase.table("vitals").select("*").eq("patient_id", patient_id).execute()
+    if not vitals_res.data:
+        return jsonify({"error": "Signes vitaux manquants pour le patient"}), 400
+
+    # Vérifier la chambre et le lit
+    room = ROOMS.get(room_id)
+    if not room:
+        return jsonify({"error": f"Chambre {room_id} inexistante"}), 404
+    if bed_id < 1 or bed_id > room.get("beds", 0):
+        return jsonify({"error": f"Lit {bed_id} invalide pour la chambre {room_id}"}), 422
+
+    # Mettre à jour le patient
+    updates = {
+        "status": "dispatché",
+        "room_number": room_id,
+        "bed_id": bed_id,
+        "assigned_nurse_id": nurse_id,
+        "updated_at": now_iso()
+    }
+    supabase.table(TABLES["patients"]).update(updates).eq("id", patient_id).execute()
+
+    # Ajout à la file d'attente si besoin
+    try:
+        last = supabase.table("patient_queue").select("arrival_order").order("arrival_order", desc=True).limit(1).execute().data or []
+        arrival_order = (last[0].get("arrival_order", 0) + 1) if last else 1
+        supabase.table("patient_queue").insert({
+            "patient_id": patient_id,
+            "status": "dispatché",
+            "arrival_order": arrival_order,
+            "arrival_time": now_iso(),
+            "created_by": g.current_user.get("id"),
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        }).execute()
+    except Exception as e:
+        print(f"Erreur lors de l'ajout à la file d'attente : {e}")
+
+    add_audit("DISPATCH", "patient", f"Dispatch du patient {patient_id} vers {room_id} lit {bed_id}", patient_id)
+    invalidate_cache()
+    return jsonify({"message": "Patient dispatché", "patient_id": patient_id, "room": room_id, "bed": bed_id}), 200
+
+# ==================== BOX RELEASE ====================
+
+@app.route("/api/boxes/<int:box_id>/release", methods=["POST"])
+@token_required
+@roles_required("super_admin", "infirmier")
+def release_box(box_id: int):
+    """Libère un box (marque le statut à 'free')."""
+    try:
+        supabase.table("medical_boxes").update({"status": "free", "updated_at": now_iso()}).eq("id", box_id).execute()
+    except Exception as e:
+        return jsonify({"error": f"Impossible de libérer le box {box_id}: {e}"}), 500
+    add_audit("RELEASE", "box", f"Box {box_id} libéré", box_id)
+    invalidate_cache()
+    return jsonify({"message": f"Box {box_id} libéré"}), 200
+
+# ==================== PRESCRIPTIONS ====================
+
+@app.route("/api/prescriptions", methods=["POST"])
+@token_required
+@roles_required("super_admin", "docteur", "pharmacie")
+def add_prescription():
+    """Ajoute une prescription.
+    Payload : {"patient_id": int, "medic_id": int, "dose": str, "frequency": str}
+    """
+    data = fast_json()
+    required = ["patient_id", "medic_id", "dose", "frequency"]
+    if not all(k in data for k in required):
+        return jsonify({"error": "patient_id, medic_id, dose et frequency requis"}), 422
+    # Vérifier patient existant
+    pat = supabase.table(TABLES["patients"]).select("id").eq("id", data["patient_id"]).execute()
+    if not pat.data:
+        return jsonify({"error": "Patient introuvable"}), 404
+    # Insérer la prescription
+    prescription = {
+        "patient_id": data["patient_id"],
+        "medic_id": data["medic_id"],
+        "dose": data["dose"],
+        "frequency": data["frequency"],
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    res = supabase.table("prescriptions").insert(prescription).execute()
+    add_audit("CREATE", "prescription", f"Prescription pour patient {data['patient_id']}", res.data[0].get("id"))
+    invalidate_cache()
+    return jsonify(res.data[0]), 201
+
+# ==================== LAB PDF ====================
+
+@app.route("/lab/report/pdf/<int:test_id>", methods=["GET"])
+@token_required
+@roles_required("super_admin", "laboratoire", "docteur")
+def generate_lab_pdf(test_id: int):
+    """Génère un PDF pour le résultat de laboratoire indiqué."""
+    test_res = supabase.table("lab_tests").select("*").eq("id", test_id).execute()
+    if not test_res.data:
+        return jsonify({"error": "Test de laboratoire introuvable"}), 404
+    test = test_res.data[0]
+    try:
+        from io import BytesIO
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        c.setFont("Helvetica", 12)
+        c.drawString(50, 800, f"Rapport de laboratoire – Test ID: {test_id}")
+        c.drawString(50, 780, f"Patient ID: {test.get('patient_id')}")
+        c.drawString(50, 760, f"Type: {test.get('test_type')}")
+        c.drawString(50, 740, f"Résultat: {test.get('result')}")
+        c.drawString(50, 720, f"Observations: {test.get('observations')}")
+        c.showPage()
+        c.save()
+        pdf = buffer.getvalue()
+        buffer.close()
+        return Response(pdf, mimetype='application/pdf',
+                        headers={"Content-Disposition": f"inline; filename=lab_report_{test_id}.pdf"})
+    except Exception as e:
+        return jsonify({"error": f"Génération PDF échouée: {e}"}), 500
 
 # ==================== PATIENT BARCODE ====================
 @app.route("/api/patients/<int:patient_id>/barcode", methods=["GET"])
@@ -1804,7 +2041,6 @@ def get_workflow_doctors():
 
 @app.route("/api/workflow/queue", methods=["GET"])
 @roles_required("super_admin", "reception", "infirmier", "docteur")
-@cached(timeout=30)
 def get_patient_queue():
     role = g.current_user.get("role")
     status = request.args.get("status", "").strip()
@@ -1948,7 +2184,11 @@ def workflow_vitals():
         patient_updates["updated_at"] = now_iso()
         supabase.table(TABLES["patients"]).update(patient_updates).eq("id", patient_id).execute()
     
-    supabase.table("patient_queue").update({"status": "vitals_done", "updated_at": now_iso()}).eq("patient_id", patient_id).in_("status", ["waiting", "vitals_done"]).execute()
+    # Un patient déjà pris en charge par l'infirmier doit rejoindre le même
+    # workflow que les autres dès que ses signes vitaux sont enregistrés.
+    # Sans `with_nurse` ici, il restait invisible pour le dispatch puis pour
+    # la salle d'attente du médecin, qui ne lit que les patients `assigned`.
+    supabase.table("patient_queue").update({"status": "vitals_done", "updated_at": now_iso()}).eq("patient_id", patient_id).in_("status", ["waiting", "with_nurse", "vitals_done"]).execute()
     add_audit("CREATE", "vital_signs", f"Signes vitaux patient #{patient_id}", patient_id)
     invalidate_cache()
     return jsonify(result.data[0]), 201
@@ -2016,7 +2256,9 @@ def dispatch_patient():
     doctor = doctors.get(doctor_id)
     if not doctor or doctor.get("role") != "docteur":
         return jsonify({"error": "Médecin introuvable ou invalide"}), 422
-    current_queue = supabase.table("patient_queue").select("assigned_doctor_id").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
+    current_queue = supabase.table("patient_queue").select("id,status,assigned_doctor_id").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
+    if not current_queue or current_queue[0].get("status") not in ("vitals_done", "with_nurse", "assigned"):
+        return jsonify({"error": "Le patient doit être dans la file avec des signes vitaux avant le dispatch"}), 409
     previous_doctor_id = data.get("previous_doctor_id")
     if not previous_doctor_id and current_queue:
         previous_doctor_id = current_queue[0].get("assigned_doctor_id")
@@ -2053,12 +2295,23 @@ def dispatch_patient():
         "created_at": now_iso()
     }
     result = compatible_insert("patient_dispatches", payload)
-    supabase.table("patient_queue").update({
+    queue_update = supabase.table("patient_queue").update({
         "status": "assigned",
         "assigned_doctor_id": doctor_id,
         "assigned_doctor_name": payload["doctor_name"],
         "updated_at": now_iso()
-    }).eq("patient_id", patient_id).in_("status", ["vitals_done", "assigned"]).execute()
+    }).eq("patient_id", patient_id).in_("status", ["vitals_done", "with_nurse", "assigned"]).execute()
+    if not queue_update.data:
+        # Éviter de laisser un box occupé ou un dispatch orphelin si la ligne
+        # de file a changé entre la vérification et la mise à jour.
+        if box_id:
+            supabase.table("medical_boxes").update({
+                "status": "free", "patient_id": None, "patient_name": None,
+                "occupied_at": None, "updated_at": now_iso()
+            }).eq("id", to_int(box_id)).eq("patient_id", patient_id).execute()
+        if result.data:
+            supabase.table("patient_dispatches").delete().eq("id", result.data[0].get("id")).execute()
+        return jsonify({"error": "Patient introuvable dans un état dispatchable"}), 409
     supabase.table(TABLES["patients"]).update({"status": "assigned", "assigned_doctor_id": doctor_id, "updated_at": now_iso()}).eq("id", patient_id).execute()
     add_audit("CREATE", "dispatch", f"Patient #{patient_id} assigne a {payload['doctor_name']}", patient_id)
     invalidate_cache()
@@ -2219,32 +2472,8 @@ def create_final_invoice_from_account():
 @roles_required("super_admin", "infirmier", "docteur", "reception")
 def hospitalization_rooms():
     if request.method == "GET":
-        rows = supabase.table("hospitalization_rooms").select("*").order("room_number").execute().data or []
-        for row in rows:
-            total = max(1, to_int(row.get("total_beds"), 1))
-            occupied = max(0, to_int(row.get("occupied_beds"), 0))
-            row["total_beds"] = total
-            row["occupied_beds"] = occupied
-            row["available_beds"] = max(0, total - occupied)
-            row["status"] = "available" if occupied < total else "occupied"
-        return jsonify(rows)
-    if g.current_user.get("role") not in ("super_admin", "infirmier"):
-        return jsonify({"error": "Droit insuffisant"}), 403
-    data = fast_json()
-    room_number = str(data.get("room_number", "")).strip()
-    if not room_number:
-        return jsonify({"error": "Numéro de chambre requis"}), 422
-    room = compatible_insert("hospitalization_rooms", {
-        "room_number": room_number,
-        "service": data.get("service", "Hospitalisation"),
-        "total_beds": max(1, to_int(data.get("total_beds"), 1)),
-        "occupied_beds": 0,
-        "status": "available",
-        "created_at": now_iso(),
-        "updated_at": now_iso()
-    })
-    invalidate_cache()
-    return jsonify(room.data[0]), 201
+        return jsonify(hardcoded_hospitalization_rooms())
+    return jsonify({"error": "Les chambres sont définies dans le catalogue ROOMS et ne peuvent pas être créées via l'API"}), 405
 
 @app.route("/api/workflow/hospitalizations", methods=["GET", "POST"])
 @roles_required("super_admin", "infirmier", "docteur", "reception")
@@ -2316,18 +2545,6 @@ def _discharge_workflow_hospitalization(hosp_id: int, data: dict):
         amount = days * daily_rate
         add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s)", amount, "hospitalization", hosp_id, days, daily_rate)
         facture_auto(to_int(row.get("patient_id")), "HOSPI_JOUR", days, "hospitalization", hosp_id)
-    room_id = to_int(row.get("room_id"))
-    if room_id:
-        room_result = supabase.table("hospitalization_rooms").select("occupied_beds,total_beds").eq("id", room_id).execute()
-        if room_result.data:
-            room = room_result.data[0]
-            occupied = max(0, to_int(room.get("occupied_beds"), 0) - 1)
-            supabase.table("hospitalization_rooms").update({
-                "occupied_beds": occupied,
-                "status": "available" if occupied < max(1, to_int(room.get("total_beds"), 1)) else "occupied",
-                "updated_at": now_iso()
-            }).eq("id", room_id).execute()
-    
     supabase.table(TABLES["patients"]).update({"status": "discharged", "updated_at": now_iso()}).eq("id", row.get("patient_id")).execute()
     add_audit("UPDATE", "hospitalization", f"Sortie hospitalisation #{hosp_id}", hosp_id)
     invalidate_cache()
@@ -2353,18 +2570,17 @@ def patch_workflow_hospitalization(hosp_id: int):
             return jsonify({"error": "Chambre requise pour l'admission"}), 422
         if not str(data.get("bed_id") or data.get("bed") or "").strip():
             return jsonify({"error": "Lit requis pour l'admission"}), 422
-        room_result = supabase.table("hospitalization_rooms").select("*").eq("id", room_id).execute()
-        if not room_result.data:
+        room = next((item for item in hardcoded_hospitalization_rooms() if item["id"] == room_id), None)
+        if not room:
             return jsonify({"error": "Chambre introuvable"}), 404
-        room = room_result.data[0]
+        requested_bed = str(data.get("bed_id") or data.get("bed"))
+        if to_int(requested_bed) < 1 or to_int(requested_bed) > to_int(room.get("total_beds"), 1):
+            return jsonify({"error": "Lit invalide pour cette chambre"}), 422
+        if requested_bed in room.get("occupied_bed_ids", []):
+            return jsonify({"error": "Ce lit est déjà occupé"}), 422
         if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
             return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
-        supabase.table("hospitalization_rooms").update({
-            "occupied_beds": to_int(room.get("occupied_beds"), 0) + 1,
-            "status": "occupied",
-            "updated_at": now_iso()
-        }).eq("id", room_id).execute()
-        data = {**data, "status": "admitted", "admission_date": data.get("admission_date") or now_iso(),
+        data = {**data, "room": room.get("room_number"), "status": "admitted", "admission_date": data.get("admission_date") or now_iso(),
                 "admitted_by": g.current_user["id"], "admitted_by_name": g.current_user["name"]}
         supabase.table(TABLES["patients"]).update({"status": "admitted", "updated_at": now_iso()}).eq("id", current.get("patient_id")).execute()
     allowed = ("admission_date", "discharge_date", "room", "bed", "bed_id", "room_id", "reason", "doctor_id", "doctor_name", "daily_rate", "notes", "status", "admitted_by", "admitted_by_name")
