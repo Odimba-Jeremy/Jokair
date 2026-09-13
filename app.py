@@ -1822,7 +1822,12 @@ def workflow_vitals():
     payload = {
         "patient_id": patient_id,
         "temperature": data.get("temperature"),
-        "blood_pressure": data.get("blood_pressure", ""),
+        "blood_pressure": data.get("blood_pressure") or (
+            f"{data.get('blood_pressure_sys')}/{data.get('blood_pressure_dia')}"
+            if data.get("blood_pressure_sys") is not None and data.get("blood_pressure_dia") is not None else ""
+        ),
+        "blood_pressure_sys": data.get("blood_pressure_sys"),
+        "blood_pressure_dia": data.get("blood_pressure_dia"),
         "weight": data.get("weight"),
         "height": data.get("height"),
         "heart_rate": data.get("heart_rate"),
@@ -1868,7 +1873,7 @@ def workflow_vitals():
 @roles_required("super_admin", "infirmier")
 def update_workflow_vitals(vital_id: int):
     data = fast_json()
-    allowed = ["temperature", "blood_pressure", "weight", "height", "heart_rate", "oxygen_saturation", "notes"]
+    allowed = ["temperature", "blood_pressure", "blood_pressure_sys", "blood_pressure_dia", "weight", "height", "heart_rate", "oxygen_saturation", "notes"]
     updates = {k: data.get(k) for k in allowed if k in data}
     updates["updated_at"] = now_iso()
     result = compatible_update("vital_signs", updates, "id", vital_id)
@@ -1925,22 +1930,31 @@ def dispatch_patient():
         return jsonify({"error": "Les signes vitaux doivent etre preleves avant le dispatch"}), 422
     doctors = get_user_map()
     doctor = doctors.get(doctor_id)
+    if not doctor or doctor.get("role") != "docteur":
+        return jsonify({"error": "Médecin introuvable ou invalide"}), 422
     current_queue = supabase.table("patient_queue").select("assigned_doctor_id").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
     previous_doctor_id = data.get("previous_doctor_id")
     if not previous_doctor_id and current_queue:
         previous_doctor_id = current_queue[0].get("assigned_doctor_id")
     
-    # Si box_id fourni, occuper le box
+    # Un dispatch vers un box doit toujours correspondre au médecin choisi :
+    # cette vérification doit vivre dans l'API, pas uniquement dans l'interface.
     if box_id:
         box_check = supabase.table("medical_boxes").select("status,doctor_id").eq("id", to_int(box_id)).execute()
-        if box_check.data and box_check.data[0].get("status") == "free":
-            supabase.table("medical_boxes").update({
-                "status": "occupied",
-                "patient_id": patient_id,
-                "patient_name": get_patient_map().get(patient_id, "Patient"),
-                "occupied_at": now_iso(),
-                "updated_at": now_iso()
-            }).eq("id", to_int(box_id)).execute()
+        if not box_check.data:
+            return jsonify({"error": "Box introuvable"}), 404
+        box = box_check.data[0]
+        if to_int(box.get("doctor_id")) != doctor_id:
+            return jsonify({"error": "Ce box n'est pas attribué au médecin sélectionné"}), 422
+        if box.get("status") != "free":
+            return jsonify({"error": "Ce box est déjà occupé"}), 422
+        supabase.table("medical_boxes").update({
+            "status": "occupied",
+            "patient_id": patient_id,
+            "patient_name": get_patient_map().get(patient_id, "Patient"),
+            "occupied_at": now_iso(),
+            "updated_at": now_iso()
+        }).eq("id", to_int(box_id)).execute()
     
     payload = {
         "patient_id": patient_id,
@@ -2697,6 +2711,13 @@ def create_pharmacy_item():
         "selling_price": max(0, to_float(data.get("selling_price"), 0)),
         "threshold": max(0, to_int(data.get("threshold"), 10)),
         "expiry_date": optional_date(data.get("expiry_date")),
+        "category": data.get("category") if data.get("category") in ("medicament", "injectable", "consommable") else "medicament",
+        "form": data.get("form"),
+        "dosage": data.get("dosage"),
+        "dosage_unit": data.get("dosage_unit"),
+        "route": data.get("route"),
+        "consumable_type": data.get("consumable_type"),
+        "size": data.get("size"),
         "created_at": now_iso(),
         "updated_at": now_iso()
     }
@@ -2717,7 +2738,7 @@ def get_pharmacy_item(item_id: int):
 @roles_required("super_admin", "pharmacie")
 def update_pharmacy_item(item_id: int):
     data = fast_json()
-    allowed = ["medication_name", "unit", "purchase_price", "selling_price", "threshold", "expiry_date"]
+    allowed = ["medication_name", "unit", "purchase_price", "selling_price", "threshold", "expiry_date", "category", "form", "dosage", "dosage_unit", "route", "consumable_type", "size"]
     updates = {k: v for k, v in data.items() if k in allowed and v is not None}
     if "expiry_date" in updates:
         updates["expiry_date"] = optional_date(updates["expiry_date"])
@@ -3738,9 +3759,23 @@ def create_prenatal_consultation():
         "pregnancy_id": data.get("pregnancy_id"),
         "visit_date": data.get("visit_date"),
         "weight": data.get("weight"),
-        "blood_pressure": data.get("blood_pressure", ""),
+        "visit_number": data.get("visit_number"),
+        "blood_pressure": data.get("blood_pressure") or (
+            f"{data.get('blood_pressure_systolic')}/{data.get('blood_pressure_diastolic')}"
+            if data.get("blood_pressure_systolic") is not None and data.get("blood_pressure_diastolic") is not None else ""
+        ),
+        "blood_pressure_systolic": data.get("blood_pressure_systolic"),
+        "blood_pressure_diastolic": data.get("blood_pressure_diastolic"),
         "fetal_heartbeat": data.get("fetal_heartbeat", ""),
-        "gestational_weeks": data.get("gestational_weeks"),
+        "gestational_weeks": data.get("gestational_weeks") or data.get("week_amenorrhea"),
+        "week_amenorrhea": data.get("week_amenorrhea"),
+        "uterine_height": data.get("uterine_height"),
+        "fetal_movements": data.get("fetal_movements"),
+        "presentation": data.get("presentation"),
+        "prescribed_exams": data.get("prescribed_exams"),
+        "risk_assessment": data.get("risk_assessment"),
+        "doctor_id": data.get("doctor_id") or g.current_user["id"],
+        "doctor_name": data.get("doctor_name") or g.current_user["name"],
         "observations": data.get("observations", ""),
         "created_by": g.current_user["id"],
         "created_by_name": g.current_user["name"],
@@ -3758,7 +3793,7 @@ def create_prenatal_consultation():
 def get_prenatal_consultation(consultation_id: int):
     if request.method == "PUT":
         data = fast_json()
-        allowed = ("visit_date", "weight", "blood_pressure", "fetal_heartbeat", "gestational_weeks", "observations")
+        allowed = ("visit_number", "visit_date", "weight", "blood_pressure", "blood_pressure_systolic", "blood_pressure_diastolic", "fetal_heartbeat", "gestational_weeks", "week_amenorrhea", "uterine_height", "fetal_movements", "presentation", "prescribed_exams", "risk_assessment", "observations", "doctor_id", "doctor_name")
         updates = {key: value for key, value in data.items() if key in allowed and value is not None}
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
