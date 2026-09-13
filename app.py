@@ -418,7 +418,14 @@ def get_user_map(role: str = None) -> dict:
         if role:
             query = query.eq("role", role)
         rows = query.execute().data or []
-        return {str(row["id"]): row for row in rows}
+        # Les identifiants viennent de Supabase sous forme numérique dans la plupart
+        # des routes. Garder les deux formes évite qu'un médecin valide soit rejeté
+        # lors du dispatch à cause d'une simple différence int/str.
+        users = {}
+        for row in rows:
+            users[row["id"]] = row
+            users[str(row["id"])] = row
+        return users
     except Exception:
         return {}
 
