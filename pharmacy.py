@@ -6,6 +6,27 @@ def register_pharmacy_routes(app, *, runtime):
     globals().update(runtime)
     pharmacy = Blueprint("pharmacy", __name__)
 
+    # ==================== HELPERS ====================
+    def infer_pharmacy_category(item: dict) -> str:
+        """Déduit la catégorie pharmacie d'un item (medicament, injectable, consommable)."""
+        cat = str(item.get("category") or "").lower().strip()
+        if cat in ("medicament", "médicament", "medicaments"):
+            return "medicament"
+        if cat in ("injectable", "injectables"):
+            return "injectable"
+        if cat in ("consommable", "consommables", "consumable"):
+            return "consommable"
+        if item.get("route") or "injectable" in str(item.get("form") or "").lower() or "ampoule" in str(item.get("form") or "").lower():
+            return "injectable"
+        if item.get("consumable_type") or item.get("size"):
+            return "consommable"
+        name = str(item.get("medication_name") or item.get("product_name") or item.get("name") or "").lower()
+        if any(k in name for k in ("seringue", "aiguille", "compresse", "gant", "sparadrap", "coton", "pansement", "catheter", "cathéter", "sonde", "masque", "perfuseur", "tubulure", "bistouri", "garrot")):
+            return "consommable"
+        if any(k in name for k in ("injectable", "inj", "ampoule", "perfusion", "perf")):
+            return "injectable"
+        return "medicament"
+
     @pharmacy.route("/api/pharmacy", methods=["GET"])
     @roles_required(*ROLES["staff"])
     @cached(60)
@@ -103,7 +124,7 @@ def register_pharmacy_routes(app, *, runtime):
         else:
             new_qty = quantity
         result = supabase.table(TABLES["pharmacy"]).update({"quantity": new_qty, "updated_at": now_iso()}).eq("id", item_id).execute()
-        
+
         compatible_insert("pharmacy_movements", {
             "medication_id": item_id,
             "medication_name": item_result.data[0].get("medication_name", "Médicament"),
@@ -115,7 +136,7 @@ def register_pharmacy_routes(app, *, runtime):
             "created_by_name": g.current_user["name"],
             "created_at": now_iso()
         })
-        
+
         add_audit("UPDATE", "pharmacy", f"Stock #{item_id}: {current} -> {new_qty}", item_id)
         invalidate_cache()
         return jsonify(result.data[0])
@@ -157,7 +178,7 @@ def register_pharmacy_routes(app, *, runtime):
                 response = create_grouped_invoice()
             new_qty = item.get("quantity", 0) - quantity
             supabase.table(TABLES["pharmacy"]).update({"quantity": new_qty, "updated_at": now_iso()}).eq("id", item_id).execute()
-            
+
             compatible_insert("pharmacy_movements", {
                 "medication_id": item_id,
                 "medication_name": item.get("medication_name"),
@@ -169,7 +190,7 @@ def register_pharmacy_routes(app, *, runtime):
                 "created_by_name": g.current_user["name"],
                 "created_at": now_iso()
             })
-            
+
             add_audit("UPDATE", "pharmacy", f"Dispensation: {item.get('medication_name')} x{quantity}", item_id)
             invalidate_cache()
             return jsonify({"message": "Médicament délivré avec succès", "invoice": response.get_json() if hasattr(response, 'get_json') else None}), 201
@@ -239,7 +260,7 @@ def register_pharmacy_routes(app, *, runtime):
         items = data.get("items", [])
         if not patient_id or not items:
             return jsonify({"error": "Patient et articles requis"}), 422
-        
+
         total = 0
         for item in items:
             amount = to_float(item.get("amount"), to_float(item.get("unit_price"), 0) * to_int(item.get("quantity"), 1))
@@ -252,7 +273,7 @@ def register_pharmacy_routes(app, *, runtime):
                 "pharmacy",
                 item.get("medication_id")
             )
-        
+
         add_audit("CREATE", "pharmacy_account", f"Ajout au compte patient #{patient_id}: {total}", patient_id)
         invalidate_cache()
         return jsonify({"message": "Montant ajouté au compte patient", "total": total}), 201
@@ -268,7 +289,7 @@ def register_pharmacy_routes(app, *, runtime):
         payment_type = data.get("payment_type", "cash")
         if not patient_id or not items:
             return jsonify({"error": "Patient et articles requis"}), 422
-        
+
         total = 0
         item_list = []
         for item in items:
@@ -282,7 +303,7 @@ def register_pharmacy_routes(app, *, runtime):
                 "unit_price": unit_price,
                 "amount": amount
             })
-        
+
         invoice = {
             "invoice_number": f"PHARMA-{int(time.time())}-{secrets.token_hex(2).upper()}",
             "patient_id": patient_id,
