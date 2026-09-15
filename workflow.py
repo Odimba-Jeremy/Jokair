@@ -19,6 +19,125 @@ def register_workflow_routes(app, *, runtime):
         users = supabase.table(TABLES["users"]).select("id,name,email,role").eq("role", "docteur").execute()
         return jsonify(users.data or [])
 
+    # ==================== FILE D'ATTENTE CENTRALE ====================
+    # Cette table est la source de vérité commune à la réception, à l'infirmier
+    # et au médecin. Les interfaces ne doivent jamais recréer une file locale.
+    ACTIVE_QUEUE_STATUSES = ("waiting", "with_nurse", "vitals_done", "assigned", "in_consultation")
+    QUEUE_STATUSES = ACTIVE_QUEUE_STATUSES + ("completed", "cancelled")
+
+    def enrich_queue_rows(rows):
+        patients = get_patient_map()
+        for row in rows:
+            row["patient_name"] = patients.get(row.get("patient_id"), row.get("patient_name") or "Inconnu")
+        return rows
+
+    @workflow.route("/api/workflow/queue", methods=["GET", "POST"])
+    @roles_required("super_admin", "reception", "infirmier", "docteur")
+    def workflow_queue():
+        role = g.current_user.get("role")
+        if request.method == "GET":
+            status_filter = request.args.get("status")
+            patient_id = to_int(request.args.get("patient_id"))
+            include_history = str(request.args.get("include_history", "")).lower() in ("1", "true", "yes")
+            query = supabase.table("patient_queue").select("*")
+            if patient_id:
+                query = query.eq("patient_id", patient_id)
+            if status_filter:
+                requested = [s.strip() for s in status_filter.split(",") if s.strip() in QUEUE_STATUSES]
+                if not requested:
+                    return jsonify({"error": "Statut de file invalide"}), 422
+                query = query.in_("status", requested)
+            elif role == "reception":
+                # Le dispatch retire le patient de la réception, mais pas les SV.
+                query = query.in_("status", ["waiting", "with_nurse", "vitals_done"])
+            elif role == "docteur":
+                query = query.eq("assigned_doctor_id", g.current_user.get("id")).in_("status", ["assigned", "in_consultation"])
+            elif not include_history:
+                query = query.in_("status", ACTIVE_QUEUE_STATUSES)
+            rows = query.order("updated_at", desc=True).execute().data or []
+            return jsonify(enrich_queue_rows(rows))
+
+        data = fast_json()
+        patient_id = to_int(data.get("patient_id"))
+        if not patient_id:
+            return jsonify({"error": "Patient requis"}), 422
+        patient = supabase.table(TABLES["patients"]).select("id,full_name").eq("id", patient_id).execute().data or []
+        if not patient:
+            return jsonify({"error": "Patient introuvable"}), 404
+
+        # Idempotence : un patient ne peut avoir qu'une entrée active par défaut.
+        existing = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).in_("status", ACTIVE_QUEUE_STATUSES).order("updated_at", desc=True).limit(1).execute().data or []
+        if existing:
+            row = enrich_queue_rows(existing)[0]
+            return jsonify({"message": "Patient déjà présent dans la file", "created": False, "patient": row}), 200
+
+        last = supabase.table("patient_queue").select("arrival_order").order("arrival_order", desc=True).limit(1).execute().data or []
+        arrival_order = to_int(last[0].get("arrival_order"), 0) + 1 if last else 1
+        priority = normalize_status(data.get("priority", "normal"), ["normal", "urgent"], "normal")
+        payload = {
+            "patient_id": patient_id,
+            "status": "waiting",
+            "priority": priority,
+            "notes": data.get("notes", ""),
+            "appointment_id": data.get("appointment_id"),
+            "appointment_time": data.get("appointment_time"),
+            "arrival_order": arrival_order,
+            "arrival_time": now_iso(),
+            "created_by": g.current_user.get("id"),
+            "created_by_name": g.current_user.get("name", ""),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        result = compatible_insert("patient_queue", payload)
+        row = (result.data or [payload])[0]
+        row["patient_name"] = patient[0].get("full_name", "Inconnu")
+        add_audit("CREATE", "patient_queue", f"Patient #{patient_id} ajouté à la file", patient_id)
+        invalidate_cache()
+        return jsonify({"message": "Patient ajouté à la file", "created": True, "patient": row}), 201
+
+    @workflow.patch("/api/workflow/queue/<int:patient_id>")
+    @roles_required("super_admin", "reception", "infirmier", "docteur")
+    def update_workflow_queue(patient_id: int):
+        data = fast_json()
+        new_status = data.get("status")
+        if new_status not in QUEUE_STATUSES:
+            return jsonify({"error": "Statut de file invalide"}), 422
+        role = g.current_user.get("role")
+        current = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).order("updated_at", desc=True).limit(1).execute().data or []
+        if not current:
+            return jsonify({"error": "Patient absent de la file"}), 404
+        row = current[0]
+        current_status = row.get("status")
+        allowed_by_role = {
+            "reception": {"cancelled"},
+            "infirmier": {"with_nurse", "vitals_done"},
+            "docteur": {"in_consultation", "completed"},
+            "super_admin": set(QUEUE_STATUSES),
+        }
+        if new_status not in allowed_by_role.get(role, set()):
+            return jsonify({"error": "Transition non autorisée pour ce rôle"}), 403
+        allowed_transitions = {
+            "waiting": {"with_nurse", "vitals_done", "cancelled"},
+            "with_nurse": {"vitals_done", "cancelled"},
+            "vitals_done": {"assigned", "cancelled"},
+            "assigned": {"in_consultation", "completed"},
+            "in_consultation": {"completed"},
+            "completed": set(),
+            "cancelled": set(),
+        }
+        if new_status == current_status:
+            return jsonify(enrich_queue_rows([row])[0]), 200
+        if new_status not in allowed_transitions.get(current_status, set()):
+            return jsonify({"error": f"Transition invalide : {current_status} → {new_status}"}), 409
+        updates = {"status": new_status, "updated_at": now_iso()}
+        result = supabase.table("patient_queue").update(updates).eq("id", row.get("id")).eq("status", current_status).execute()
+        if not result.data:
+            return jsonify({"error": "La file a été modifiée par un autre utilisateur"}), 409
+        updated = enrich_queue_rows(result.data)[0]
+        add_audit("UPDATE", "patient_queue", f"Patient #{patient_id}: {current_status} → {new_status}", patient_id)
+        invalidate_cache()
+        return jsonify(updated)
+
     @workflow.route("/api/workflow/vitals", methods=["GET", "POST"])
     @roles_required(*ROLES["staff"])
     def workflow_vitals():
@@ -399,6 +518,16 @@ def register_workflow_routes(app, *, runtime):
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
         role = g.current_user.get("role")
+        patient_row = supabase.table(TABLES["patients"]).select("id,assigned_doctor_id").eq("id", patient_id).execute().data or []
+        if not patient_row:
+            return jsonify({"error": "Patient introuvable"}), 404
+        # Lorsqu'un infirmier admet directement un patient, conserver le médecin
+        # déjà assigné au patient. Sans cela l'admission n'était visible dans
+        # aucun écran « Mes patients hospitalisés » du médecin.
+        assigned_doctor_id = data.get("doctor_id") or (
+            g.current_user["id"] if role == "docteur" else patient_row[0].get("assigned_doctor_id")
+        )
+        assigned_doctor = get_user_map().get(assigned_doctor_id) if assigned_doctor_id else None
         # Toute création est une demande. L'admission est exclusivement réalisée via
         # PATCH par l'infirmier, après sélection obligatoire d'une chambre et d'un lit.
         status = "pending"
@@ -412,8 +541,8 @@ def register_workflow_routes(app, *, runtime):
             "bed": data.get("bed") or data.get("bed_id", ""),
             "bed_id": data.get("bed_id") or data.get("bed", ""),
             "room_id": data.get("room_id"),
-            "doctor_id": data.get("doctor_id") or (g.current_user["id"] if role == "docteur" else None),
-            "doctor_name": data.get("doctor_name", "") or (g.current_user["name"] if role == "docteur" else ""),
+            "doctor_id": assigned_doctor_id,
+            "doctor_name": data.get("doctor_name", "") or (assigned_doctor.get("name", "") if assigned_doctor else (g.current_user["name"] if role == "docteur" else "")),
             "daily_rate": to_float(data.get("daily_rate"), get_tariff_amount("hospitalisation", "Hospitalisation", 0)),
             "created_by": g.current_user["id"],
             "created_by_name": g.current_user["name"],
