@@ -54,10 +54,23 @@ def register_admin_routes(app, *, runtime):
     # ==================== USERS ====================
     @app.route("/api/users", methods=["GET"])
     @app.route("/api/auth/users", methods=["GET"])
-    @roles_required("super_admin")
+    @roles_required("super_admin", "reception")
     @cached(120)
     def get_users():
-        result = supabase.table(TABLES["users"]).select("*").order("created_at", desc=True).execute()
+        requested_role = str(request.args.get("role") or "").strip()
+        # La réception ne peut consulter que le répertoire des médecins pour
+        # créer un rendez-vous ; la liste complète reste réservée à l'admin.
+        if g.current_user.get("role") == "reception" and requested_role not in ("docteur", "doctor"):
+            return jsonify({"error": "La réception peut uniquement consulter les médecins"}), 403
+        query = supabase.table(TABLES["users"]).select("*")
+        if requested_role:
+            if requested_role in ("docteur", "doctor"):
+                query = query.in_("role", ["docteur", "doctor"])
+            else:
+                if requested_role not in ROLES["staff"]:
+                    return jsonify({"error": "Rôle invalide"}), 422
+                query = query.eq("role", requested_role)
+        result = query.order("created_at", desc=True).execute()
         users = [{k: v for k, v in u.items() if k != "password_hash"} for u in result.data]
         return jsonify(users)
 
