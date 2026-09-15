@@ -125,6 +125,24 @@ def register_doctor_routes(app, *, runtime):
         except Exception:
             dispensed_ids = set()
         for p in prescriptions:
+            dosage = str(p.get("dosage") or "")
+            if "QTY:" in dosage:
+                parts = dosage.split("|", 2)
+                for part in parts:
+                    if part.startswith("QTY:"):
+                        try:
+                            p["quantity"] = int(part.replace("QTY:", "").strip())
+                        except Exception:
+                            pass
+                    elif part.startswith("PID:"):
+                        pid_val = part.replace("PID:", "").strip()
+                        if pid_val and not p.get("product_id"):
+                            try:
+                                p["product_id"] = int(pid_val) if pid_val.isdigit() else pid_val
+                            except Exception:
+                                pass
+                if len(parts) >= 3:
+                    p["dosage"] = parts[2]
             p["patient_name"] = patient_map.get(p.get("patient_id"), "Inconnu")
             if str(p.get("id")) in dispensed_ids:
                 p["pharmacy_status"] = "dispensed"
@@ -144,6 +162,8 @@ def register_doctor_routes(app, *, runtime):
         if not patient:
             return jsonify({"error": "Patient introuvable"}), 404
         quantity = max(1, to_int(data.get("quantity"), 1))
+        raw_dosage = str(data.get("dosage") or data.get("dose") or "").strip()
+        encoded_dosage = f"QTY:{quantity}|PID:{data.get('product_id') or ''}|{raw_dosage}"
         prescription = {
             "patient_id": patient_id,
             # `medication` est conservé pour les anciens écrans ; les champs
@@ -154,7 +174,7 @@ def register_doctor_routes(app, *, runtime):
             "quantity": quantity,
             "stock_unit": data.get("stock_unit", ""),
             "form": data.get("form", ""),
-            "dosage": data.get("dosage") or data.get("dose", ""),
+            "dosage": encoded_dosage,
             "frequency": data.get("frequency", ""),
             "duration": data.get("duration", ""),
             "start_date": optional_date(data.get("start_date")),

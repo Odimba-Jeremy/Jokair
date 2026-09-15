@@ -322,7 +322,7 @@ def compatible_update(table_name: str, data: dict, field: str, value: Any):
 def invalidate_cache(pattern: str = None):
     cache.clear()
 
-def cached(timeout=CACHE_TIMEOUT, key_prefix=None):
+def cached(timeout=CACHE_TIMEOUT, key_prefix=None, **kwargs):
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
@@ -426,13 +426,10 @@ def linked_patient_ids_for_user() -> set:
 def filter_patients_for_role(patients: list) -> list:
     role = g.current_user.get("role") if hasattr(g, "current_user") else ""
     patients = add_pregnancy_flags(patients)
-    if role in ("super_admin", "infirmier"):
+    if role in ("super_admin", "infirmier", "reception", "docteur"):
         return patients
-    if role == "docteur":
-        linked_ids = linked_patient_ids_for_user()
-        return [p for p in patients if str(p.get("id")) in linked_ids]
     linked_ids = linked_patient_ids_for_user()
-    if role == "reception" and not linked_ids:
+    if not linked_ids:
         return patients
     return [p for p in patients if str(p.get("id")) in linked_ids]
 
