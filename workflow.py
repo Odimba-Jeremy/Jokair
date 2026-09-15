@@ -51,10 +51,21 @@ def register_workflow_routes(app, *, runtime):
                 # Le dispatch retire le patient de la réception, mais pas les SV.
                 query = query.in_("status", ["waiting", "with_nurse", "vitals_done"])
             elif role == "docteur":
-                query = query.eq("assigned_doctor_id", g.current_user.get("id")).in_("status", ["assigned", "in_consultation"])
+                # Ne pas filtrer directement l'UUID/entier dans PostgREST : les
+                # anciennes données peuvent stocker l'identifiant sous un type
+                # différent. Le filtrage Python ci-dessous compare les valeurs
+                # normalisées et évite qu'un patient dispatché disparaisse.
+                query = query.in_("status", ["assigned", "in_consultation"])
             elif not include_history:
                 query = query.in_("status", ACTIVE_QUEUE_STATUSES)
             rows = query.order("updated_at", desc=True).execute().data or []
+            if role == "docteur":
+                doctor_id = str(g.current_user.get("id") or "").strip()
+                doctor_name = str(g.current_user.get("name") or "").strip().casefold()
+                rows = [row for row in rows if (
+                    (doctor_id and str(row.get("assigned_doctor_id") or row.get("doctor_id") or "").strip() == doctor_id)
+                    or (doctor_name and str(row.get("assigned_doctor_name") or row.get("doctor_name") or "").strip().casefold() == doctor_name)
+                )]
             return jsonify(enrich_queue_rows(rows))
 
         data = fast_json()
@@ -107,6 +118,8 @@ def register_workflow_routes(app, *, runtime):
         if not current:
             return jsonify({"error": "Patient absent de la file"}), 404
         row = current[0]
+        if role == "docteur" and str(row.get("assigned_doctor_id") or "").strip() != str(g.current_user.get("id") or "").strip():
+            return jsonify({"error": "Patient non assigné à ce médecin"}), 403
         current_status = row.get("status")
         allowed_by_role = {
             "reception": {"cancelled"},
