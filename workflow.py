@@ -36,37 +36,49 @@ def register_workflow_routes(app, *, runtime):
     def workflow_queue():
         role = g.current_user.get("role")
         if request.method == "GET":
+            # ----- Construction de la requête de base -----
             status_filter = request.args.get("status")
             patient_id = to_int(request.args.get("patient_id"))
             include_history = str(request.args.get("include_history", "")).lower() in ("1", "true", "yes")
             query = supabase.table("patient_queue").select("*")
+
+            # ----- Filtrage par patient_id (facultatif) -----
             if patient_id:
                 query = query.eq("patient_id", patient_id)
+
+            # ----- Filtrage par statut (facultatif) -----
             if status_filter:
                 requested = [s.strip() for s in status_filter.split(",") if s.strip() in QUEUE_STATUSES]
                 if not requested:
                     return jsonify({"error": "Statut de file invalide"}), 422
                 query = query.in_("status", requested)
-            elif role == "reception":
-                # Le dispatch retire le patient de la réception, mais pas les SV.
-                query = query.in_("status", ["waiting", "with_nurse", "vitals_done"])
-            elif role == "docteur":
-                # Ne pas filtrer directement l'UUID/entier dans PostgREST : les
-                # anciennes données peuvent stocker l'identifiant sous un type
-                # différent. Le filtrage Python ci-dessous compare les valeurs
-                # normalisées et évite qu'un patient dispatché disparaisse.
-                query = query.in_("status", ["assigned", "in_consultation"])
-            elif not include_history:
-                query = query.in_("status", ACTIVE_QUEUE_STATUSES)
-            rows = query.order("updated_at", desc=True).execute().data or []
+            else:
+                # Aucun filtre explicite de statut → appliquer le filtre par rôle
+                if role == "reception":
+                    query = query.in_("status", ["waiting", "with_nurse", "vitals_done"]) 
+                elif role == "docteur":
+                    query = query.in_("status", ["assigned", "in_consultation"]) 
+                elif role == "infirmier":
+                    query = query.in_("status", ACTIVE_QUEUE_STATUSES)
+                elif not include_history:
+                    query = query.in_("status", ACTIVE_QUEUE_STATUSES)
+
+            # ----- Filtrage du médecin (toujours appliqué quand le rôle est docteur) -----
             if role == "docteur":
                 doctor_id = str(g.current_user.get("id") or "").strip()
                 doctor_name = str(g.current_user.get("name") or "").strip().casefold()
-                rows = [row for row in rows if (
-                    (doctor_id and str(row.get("assigned_doctor_id") or row.get("doctor_id") or "").strip() == doctor_id)
-                    or (doctor_name and str(row.get("assigned_doctor_name") or row.get("doctor_name") or "").strip().casefold() == doctor_name)
+                if doctor_id:
+                    query = query.eq("assigned_doctor_id", doctor_id)
+                rows = query.order("updated_at", desc=True).execute().data or []
+                rows = [r for r in rows if (
+                    (doctor_id and str(r.get("assigned_doctor_id") or "").strip() == doctor_id) or
+                    (doctor_name and str(r.get("assigned_doctor_name") or "").strip().casefold() == doctor_name)
                 )]
-            return jsonify(enrich_queue_rows(rows))
+            else:
+                rows = query.order("updated_at", desc=True).execute().data or []
+
+            total = len(rows)
+            return jsonify({"total": total, "patients": enrich_queue_rows(rows)})
 
         data = fast_json()
         patient_id = to_int(data.get("patient_id"))
