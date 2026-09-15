@@ -136,12 +136,25 @@ def register_doctor_routes(app, *, runtime):
     @roles_required("super_admin", "docteur")
     def create_prescription():
         data = fast_json()
-        if not data.get("patient_id") or not data.get("medication"):
+        medication = str(data.get("medication") or data.get("product_name") or "").strip()
+        if not data.get("patient_id") or not medication:
             return jsonify({"error": "Patient et médicament requis"}), 422
+        patient_id = to_int(data.get("patient_id"))
+        patient = supabase.table(TABLES["patients"]).select("id").eq("id", patient_id).execute().data or []
+        if not patient:
+            return jsonify({"error": "Patient introuvable"}), 404
+        quantity = max(1, to_int(data.get("quantity"), 1))
         prescription = {
-            "patient_id": to_int(data.get("patient_id")),
-            "medication": data.get("medication"),
-            "dosage": data.get("dosage", ""),
+            "patient_id": patient_id,
+            # `medication` est conservé pour les anciens écrans ; les champs
+            # produit rendent la délivrance pharmacie déterministe.
+            "medication": medication,
+            "product_id": data.get("product_id"),
+            "product_name": medication,
+            "quantity": quantity,
+            "stock_unit": data.get("stock_unit", ""),
+            "form": data.get("form", ""),
+            "dosage": data.get("dosage") or data.get("dose", ""),
             "frequency": data.get("frequency", ""),
             "duration": data.get("duration", ""),
             "start_date": optional_date(data.get("start_date")),
@@ -156,9 +169,10 @@ def register_doctor_routes(app, *, runtime):
             "updated_at": now_iso()
         }
         result = compatible_insert(TABLES["prescriptions"], prescription)
-        add_audit("CREATE", "prescription", f"Prescription #{result.data[0]['id']}", result.data[0]["id"])
+        created = result.data[0] if result.data else prescription
+        add_audit("CREATE", "prescription", f"Prescription #{created.get('id', '')}", created.get("id"))
         invalidate_cache()
-        return jsonify(result.data[0]), 201
+        return jsonify(created), 201
 
     @app.route("/api/prescriptions/<int:prescription_id>", methods=["PUT"])
     @roles_required("super_admin", "docteur")
