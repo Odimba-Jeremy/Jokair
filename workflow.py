@@ -55,9 +55,9 @@ def register_workflow_routes(app, *, runtime):
             else:
                 # Aucun filtre explicite de statut → appliquer le filtre par rôle
                 if role == "reception":
-                    query = query.in_("status", ["waiting", "with_nurse", "vitals_done"]) 
+                    query = query.in_("status", ["waiting", "with_nurse", "vitals_done", "assigned"])
                 elif role == "docteur":
-                    query = query.in_("status", ["assigned", "in_consultation"]) 
+                    query = query.in_("status", ["assigned", "in_consultation"])
                 elif role == "infirmier":
                     query = query.in_("status", ACTIVE_QUEUE_STATUSES)
                 elif not include_history:
@@ -70,15 +70,13 @@ def register_workflow_routes(app, *, runtime):
                 if doctor_id:
                     query = query.eq("assigned_doctor_id", doctor_id)
                 rows = query.order("updated_at", desc=True).execute().data or []
-                rows = [r for r in rows if (
-                    (doctor_id and str(r.get("assigned_doctor_id") or "").strip() == doctor_id) or
-                    (doctor_name and str(r.get("assigned_doctor_name") or "").strip().casefold() == doctor_name)
-                )]
+                # Filtrage supplémentaire par nom (insensible à la casse) si besoin
+                if doctor_name:
+                    rows = [r for r in rows if str(r.get("assigned_doctor_name") or "").strip().casefold() == doctor_name]
             else:
                 rows = query.order("updated_at", desc=True).execute().data or []
 
-            total = len(rows)
-            return jsonify({"total": total, "patients": enrich_queue_rows(rows)})
+            return jsonify(enrich_queue_rows(rows))
 
         data = fast_json()
         patient_id = to_int(data.get("patient_id"))
@@ -556,6 +554,10 @@ def register_workflow_routes(app, *, runtime):
         # Toute création est une demande. L'admission est exclusivement réalisée via
         # PATCH par l'infirmier, après sélection obligatoire d'une chambre et d'un lit.
         status = "pending"
+        bed_val = data.get("bed_id") or data.get("bed")
+        bed_id_clean = to_int(bed_val, None) if str(bed_val or "").strip() else None
+        room_id_clean = to_int(data.get("room_id"), None) if str(data.get("room_id") or "").strip() else None
+        doctor_id_clean = to_int(assigned_doctor_id, None) if str(assigned_doctor_id or "").strip() else None
         payload = {
             "patient_id": patient_id,
             "admission_date": None,
@@ -563,10 +565,10 @@ def register_workflow_routes(app, *, runtime):
             "status": status,
             "reason": data.get("reason", ""),
             "room": data.get("room", ""),
-            "bed": data.get("bed") or data.get("bed_id", ""),
-            "bed_id": data.get("bed_id") or data.get("bed", ""),
-            "room_id": data.get("room_id"),
-            "doctor_id": assigned_doctor_id,
+            "bed": str(data.get("bed") or data.get("bed_id") or ""),
+            "bed_id": bed_id_clean,
+            "room_id": room_id_clean,
+            "doctor_id": doctor_id_clean,
             "doctor_name": data.get("doctor_name", "") or (assigned_doctor.get("name", "") if assigned_doctor else (g.current_user["name"] if role == "docteur" else "")),
             "daily_rate": to_float(data.get("daily_rate"), get_tariff_amount("hospitalisation", "Hospitalisation", 0)),
             "created_by": g.current_user["id"],
