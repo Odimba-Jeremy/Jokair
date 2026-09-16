@@ -5,3 +5,16 @@ python-dotenv==1.0.0
 flask_cors==3.0.10
 flask_caching==1.11.1
 gunicorn
+flask-cors==4.0.0
+flask-caching==2.1.0
+flask-limiter==3.5.0
+flask-compress==1.14
+werkzeug==2.3.7
+itsdangerous==2.1.2
+python-dotenv==1.0.0
+gunicorn==21.2.0
+redis==5.0.1
+requests==2.31.0
+qrcode==7.4.2
+Pillow
+redis
