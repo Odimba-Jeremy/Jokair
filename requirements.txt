@@ -1,7 +1,6 @@
 Flask==2.3.3
 supabase==2.1.0
 reportlab==4.0.4
-python-dotenv==1.0.0
 flask_cors
 flask_caching==1.11.1
 flask-caching==2.1.0
