@@ -86,8 +86,37 @@ def register_medical_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "infirmier")
     def patch_care_log(care_id: int):
         data = fast_json()
-        allowed = ["status", "priority"]
+        allowed = ["status", "priority", "description"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
+
+        meta_keys = [
+            "current_occurrence", "total_occurrences", "next_due_at",
+            "frequency_hours", "duration_days", "last_administered_at",
+            "last_administered_by", "administrations", "completed_phases",
+            "current_phase"
+        ]
+        has_meta = any(k in data for k in meta_keys)
+
+        if has_meta and "description" not in updates:
+            row_res = supabase.table(TABLES["care"]).select("description, status").eq("id", care_id).execute()
+            if row_res.data:
+                desc_str = row_res.data[0].get("description") or "{}"
+                try:
+                    meta = json.loads(desc_str) if desc_str.strip().startswith("{") else {"raw_description": desc_str}
+                except Exception:
+                    meta = {"raw_description": desc_str}
+                for mk in meta_keys:
+                    if mk in data and data[mk] is not None:
+                        meta[mk] = data[mk]
+
+                cur_occ = to_int(meta.get("current_occurrence")) or 1
+                tot_occ = to_int(meta.get("total_occurrences")) or 1
+                if cur_occ > tot_occ:
+                    updates["status"] = "completed"
+                    meta["completed_at"] = now_iso()
+
+                updates["description"] = json.dumps(meta, ensure_ascii=False)
+
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
         updates["updated_at"] = now_iso()
@@ -124,6 +153,18 @@ def register_medical_routes(app, *, runtime):
                     item["patient_name"] = data.get("patient_name", "")
                     item["prescribed_by"] = data.get("doctor_name") or g.current_user.get("name", "")
                     item["doctor_id"] = data.get("doctor_id") or g.current_user.get("id")
+
+                    # Calcul du moteur d'occurrences pour injectables et actes
+                    freq_h = to_int(item.get("frequency_hours")) or 8
+                    dur_d = to_int(item.get("duration_days")) or 1
+                    tot_occ = to_int(item.get("total_occurrences")) or max(1, (dur_d * 24) // freq_h)
+                    item["frequency_hours"] = freq_h
+                    item["duration_days"] = dur_d
+                    item["total_occurrences"] = tot_occ
+                    item["current_occurrence"] = to_int(item.get("current_occurrence")) or 1
+                    item["next_due_at"] = now_iso()
+                    item["administrations"] = []
+
                     items.append(item)
             if not items:
                 return jsonify({"error": "Au moins un soin est requis"}), 422

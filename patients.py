@@ -12,34 +12,68 @@ def register_patient_routes(
     add_audit, hospital_patient_id, enrich_patient_identifier,
     enrich_patient_identifiers, add_pregnancy_flags, is_female,
     filter_patients_for_role, can_access_patient_record, allowed_statuses,
-    generate_barcode_svg, generate_qr_code_data,
+    generate_barcode_svg, generate_qr_code_data, linked_patient_ids_for_user=None,
 ):
     patients = Blueprint("patients", __name__)
 
     @patients.get("/api/patients")
     @roles_required(*roles["staff"])
-    @cached(timeout=120)
     def get_patients():
         search = request.args.get("search", "").strip().lower()
         context = request.args.get("context", "").strip().lower()
         numeric_search = re.fullmatch(r"(?:ih-ushd-)?0*(\d+)", search, re.IGNORECASE)
-        limit = min(max(to_int(request.args.get("limit"), 0), 0), 200)
+
+        page_arg = request.args.get("page")
+        limit_arg = request.args.get("limit")
+        paged_request = (page_arg is not None) or (limit_arg is not None)
+        page = max(1, to_int(page_arg, 1))
+        limit = min(max(to_int(limit_arg, 20), 1), 200) if paged_request else 0
+
+        role = g.current_user.get("role")
+        doctor_patient_ids = None
+        if role == "docteur" and callable(linked_patient_ids_for_user):
+            linked_ids = list(linked_patient_ids_for_user())
+            doctor_patient_ids = linked_ids if linked_ids else ["0"]
+
         if search:
             id_clause = f",id.eq.{int(numeric_search.group(1))}" if numeric_search else ""
-            query = supabase.table(tables["patients"]).select("*").or_(
+            query = supabase.table(tables["patients"]).select("*", count="exact").or_(
                 f"full_name.ilike.%{search}%,phone.ilike.%{search}%,email.ilike.%{search}%{id_clause}"
             ).order("created_at", desc=True)
         else:
-            query = supabase.table(tables["patients"]).select("*").order("created_at", desc=True)
-        if limit:
+            query = supabase.table(tables["patients"]).select("*", count="exact").order("created_at", desc=True)
+
+        if doctor_patient_ids is not None:
+            query = query.in_("id", doctor_patient_ids)
+
+        if paged_request and limit:
+            start = (page - 1) * limit
+            end = start + limit - 1
+            query = query.range(start, end)
+        elif limit:
             query = query.limit(limit)
-        patients_list = enrich_patient_identifiers(add_pregnancy_flags(query.execute().data or []))
+
+        res = query.execute()
+        raw_patients = res.data or []
+        total_count = res.count if res.count is not None else len(raw_patients)
+        patients_list = enrich_patient_identifiers(add_pregnancy_flags(raw_patients))
+
         role = g.current_user.get("role")
         if context in ("maternity", "pregnancy", "prenatal", "delivery") and role == "super_admin":
-            return jsonify([patient for patient in patients_list if is_female(patient)])
-        if context == "pharmacy" and role in ("super_admin", "pharmacie"):
-            return jsonify(patients_list)
-        return jsonify(filter_patients_for_role(patients_list))
+            filtered = [patient for patient in patients_list if is_female(patient)]
+        elif context == "pharmacy" and role in ("super_admin", "pharmacie"):
+            filtered = patients_list
+        else:
+            filtered = filter_patients_for_role(patients_list)
+
+        if paged_request:
+            return jsonify({
+                "data": filtered,
+                "total": total_count,
+                "page": page,
+                "limit": limit
+            })
+        return jsonify(filtered)
 
     @patients.post("/api/patients")
     @roles_required("super_admin", "reception")

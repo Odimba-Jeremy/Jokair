@@ -426,8 +426,11 @@ def linked_patient_ids_for_user() -> set:
 def filter_patients_for_role(patients: list) -> list:
     role = g.current_user.get("role") if hasattr(g, "current_user") else ""
     patients = add_pregnancy_flags(patients)
-    if role in ("super_admin", "infirmier", "reception", "docteur"):
+    if role in ("super_admin", "infirmier", "reception"):
         return patients
+    if role == "docteur":
+        linked_ids = linked_patient_ids_for_user()
+        return [p for p in patients if str(p.get("id")) in linked_ids]
     linked_ids = linked_patient_ids_for_user()
     if not linked_ids:
         return patients
@@ -915,7 +918,8 @@ register_patient_routes(app, supabase=supabase, tables=TABLES, roles=ROLES,
                         can_access_patient_record=can_access_patient_record,
                         allowed_statuses=ALLOWED_STATUSES,
                         generate_barcode_svg=generate_barcode_svg,
-                        generate_qr_code_data=generate_qr_code_data)
+                        generate_qr_code_data=generate_qr_code_data,
+                        linked_patient_ids_for_user=linked_patient_ids_for_user)
 register_workflow_routes(app, runtime=globals())
 register_pharmacy_routes(app, runtime=globals())
 register_laboratory_routes(app, runtime=globals())

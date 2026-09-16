@@ -111,7 +111,13 @@ def register_pharmacy_routes(app, *, runtime):
         quantity = max(0, to_int(data.get("quantity"), 0))
         operation = data.get("operation", "set")
         reason = data.get("reason", "Ajustement manuel")
-        item_result = supabase.table(TABLES["pharmacy"]).select("quantity").eq("id", item_id).execute()
+        # Champs optionnels pour traçabilité des livraisons de soins
+        patient_id = data.get("patient_id")
+        patient_name = data.get("patient_name")
+        doctor_name = data.get("doctor_name")
+        movement_type = data.get("movement_type")  # ex: "livraison_soin"
+
+        item_result = supabase.table(TABLES["pharmacy"]).select("quantity,medication_name").eq("id", item_id).execute()
         if not item_result.data:
             return jsonify({"error": "Médicament introuvable"}), 404
         current = to_int(item_result.data[0].get("quantity"), 0)
@@ -125,17 +131,22 @@ def register_pharmacy_routes(app, *, runtime):
             new_qty = quantity
         result = supabase.table(TABLES["pharmacy"]).update({"quantity": new_qty, "updated_at": now_iso()}).eq("id", item_id).execute()
 
-        compatible_insert("pharmacy_movements", {
+        movement = {
             "medication_id": item_id,
             "medication_name": item_result.data[0].get("medication_name", "Médicament"),
-            "type": "entree" if operation == "add" else "sortie",
+            "type": movement_type if movement_type else ("entree" if operation == "add" else "sortie"),
             "quantity": quantity,
             "reason": reason,
-            "patient_id": data.get("patient_id"),
+            "patient_id": patient_id,
+            "patient_name": patient_name,
+            "doctor_name": doctor_name,
             "created_by": g.current_user["id"],
             "created_by_name": g.current_user["name"],
             "created_at": now_iso()
-        })
+        }
+        # Supprimer les clés None pour éviter les erreurs Supabase
+        movement = {k: v for k, v in movement.items() if v is not None}
+        compatible_insert("pharmacy_movements", movement)
 
         add_audit("UPDATE", "pharmacy", f"Stock #{item_id}: {current} -> {new_qty}", item_id)
         invalidate_cache()

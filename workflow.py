@@ -3,6 +3,7 @@
 Routes migrées depuis app.py : file, SV, dispatch, boxes, consultations,
 soins, hospitalisation, suivis, administrations et tarifs workflow.
 """
+from datetime import datetime, timezone
 from flask import Blueprint
 
 
@@ -36,6 +37,16 @@ def register_workflow_routes(app, *, runtime):
     def workflow_queue():
         role = g.current_user.get("role")
         if request.method == "GET":
+            # Après minuit, les patients non clôturés des jours précédents passent à 'completed' (sortie)
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            try:
+                supabase.table("patient_queue").update({
+                    "status": "completed",
+                    "updated_at": now_iso()
+                }).in_("status", list(ACTIVE_QUEUE_STATUSES)).lt("created_at", today_start).execute()
+            except Exception:
+                pass
+
             # ----- Construction de la requête de base -----
             status_filter = request.args.get("status")
             patient_id = to_int(request.args.get("patient_id"))
@@ -55,7 +66,7 @@ def register_workflow_routes(app, *, runtime):
             else:
                 # Aucun filtre explicite de statut → appliquer le filtre par rôle
                 if role == "reception":
-                    query = query.in_("status", ["waiting", "with_nurse", "vitals_done", "assigned"])
+                    query = query.in_("status", ["waiting"])
                 elif role == "docteur":
                     query = query.in_("status", ["assigned", "in_consultation"])
                 elif role == "infirmier":
@@ -67,12 +78,16 @@ def register_workflow_routes(app, *, runtime):
             if role == "docteur":
                 doctor_id = str(g.current_user.get("id") or "").strip()
                 doctor_name = str(g.current_user.get("name") or "").strip().casefold()
-                if doctor_id:
-                    query = query.eq("assigned_doctor_id", doctor_id)
                 rows = query.order("updated_at", desc=True).execute().data or []
-                # Filtrage supplémentaire par nom (insensible à la casse) si besoin
-                if doctor_name:
-                    rows = [r for r in rows if str(r.get("assigned_doctor_name") or "").strip().casefold() == doctor_name]
+                filtered_rows = []
+                for r in rows:
+                    r_doc_id = str(r.get("assigned_doctor_id") or "").strip()
+                    r_doc_name = str(r.get("assigned_doctor_name") or "").strip().casefold()
+                    if doctor_id and r_doc_id == doctor_id:
+                        filtered_rows.append(r)
+                    elif doctor_name and r_doc_name and r_doc_name == doctor_name:
+                        filtered_rows.append(r)
+                rows = filtered_rows
             else:
                 rows = query.order("updated_at", desc=True).execute().data or []
 
