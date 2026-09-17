@@ -326,7 +326,11 @@ def cached(timeout=CACHE_TIMEOUT, key_prefix=None, **kwargs):
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
-            cache_key = key_prefix or f"{f.__name__}:{request.full_path}"
+            # Les réponses cliniques peuvent être filtrées par rôle et par médecin :
+            # ne jamais partager un cache entre deux comptes.
+            user = getattr(g, "current_user", {}) or {}
+            actor = f"{user.get('role', 'anonymous')}:{user.get('id', 'anonymous')}"
+            cache_key = f"{key_prefix or f'{f.__name__}:{request.full_path}'}:{actor}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
                 return jsonify(cached_data)
@@ -779,71 +783,7 @@ def generate_qr_code_data(patient_id: int, patient_name: str, phone: str = "") -
 
 # ==================== DISPATCH INFERMIER ====================
 
-@app.route("/api/dispatch", methods=["POST"])
-@token_required
-@roles_required("super_admin", "infirmier", "reception")
-def dispatch_patient_workflow_legacy():
-    """Dispatch d'un patient depuis la réception/infirmier.
-    Payload attendu:
-        {"patient_id": int, "nurse_id": int, "room_id": str, "bed_id": int}
-    """
-    data = fast_json()
-    patient_id = data.get("patient_id")
-    nurse_id = data.get("nurse_id")
-    room_id = data.get("room_id")
-    bed_id = data.get("bed_id")
 
-    # Vérifications de base
-    if not (patient_id and nurse_id and room_id is not None and bed_id is not None):
-        return jsonify({"error": "patient_id, nurse_id, room_id et bed_id requis"}), 422
-
-    # Vérifier que le patient existe
-    patient_res = supabase.table(TABLES["patients"]).select("*").eq("id", patient_id).execute()
-    if not patient_res.data:
-        return jsonify({"error": "Patient introuvable"}), 404
-    patient = patient_res.data[0]
-
-    # Vérifier les signes vitaux existent
-    vitals_res = supabase.table("vitals").select("*").eq("patient_id", patient_id).execute()
-    if not vitals_res.data:
-        return jsonify({"error": "Signes vitaux manquants pour le patient"}), 400
-
-    # Vérifier la chambre et le lit
-    room = ROOMS.get(room_id)
-    if not room:
-        return jsonify({"error": f"Chambre {room_id} inexistante"}), 404
-    if bed_id < 1 or bed_id > room.get("beds", 0):
-        return jsonify({"error": f"Lit {bed_id} invalide pour la chambre {room_id}"}), 422
-
-    # Mettre à jour le patient
-    updates = {
-        "status": "dispatché",
-        "room_number": room_id,
-        "bed_id": bed_id,
-        "assigned_nurse_id": nurse_id,
-        "updated_at": now_iso()
-    }
-    supabase.table(TABLES["patients"]).update(updates).eq("id", patient_id).execute()
-
-    # Ajout à la file d'attente si besoin
-    try:
-        last = supabase.table("patient_queue").select("arrival_order").order("arrival_order", desc=True).limit(1).execute().data or []
-        arrival_order = (last[0].get("arrival_order", 0) + 1) if last else 1
-        supabase.table("patient_queue").insert({
-            "patient_id": patient_id,
-            "status": "dispatché",
-            "arrival_order": arrival_order,
-            "arrival_time": now_iso(),
-            "created_by": g.current_user.get("id"),
-            "created_at": now_iso(),
-            "updated_at": now_iso()
-        }).execute()
-    except Exception as e:
-        print(f"Erreur lors de l'ajout à la file d'attente : {e}")
-
-    add_audit("DISPATCH", "patient", f"Dispatch du patient {patient_id} vers {room_id} lit {bed_id}", patient_id)
-    invalidate_cache()
-    return jsonify({"message": "Patient dispatché", "patient_id": patient_id, "room": room_id, "bed": bed_id}), 200
 
 # ==================== BOX RELEASE ====================
 

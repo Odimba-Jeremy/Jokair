@@ -5,6 +5,8 @@ soins, hospitalisation, suivis, administrations et tarifs workflow.
 """
 from datetime import datetime, timezone
 from flask import Blueprint
+import re
+import uuid
 
 
 def register_workflow_routes(app, *, runtime):
@@ -31,6 +33,12 @@ def register_workflow_routes(app, *, runtime):
         for row in rows:
             row["patient_name"] = patients.get(row.get("patient_id"), row.get("patient_name") or "Inconnu")
         return rows
+
+    def queue_uid(data):
+        supplied = str(data.get("uid") or "").strip().upper()
+        if supplied and re.fullmatch(r"[A-Z0-9-]{8,80}", supplied):
+            return supplied
+        return f"FILE-{now_iso()[:10].replace('-', '')}-{uuid.uuid4().hex[:8].upper()}"
 
     @workflow.route("/api/workflow/queue", methods=["GET", "POST"])
     @roles_required("super_admin", "reception", "infirmier", "docteur")
@@ -101,6 +109,12 @@ def register_workflow_routes(app, *, runtime):
         if not patient:
             return jsonify({"error": "Patient introuvable"}), 404
 
+        uid = queue_uid(data)
+        uid_tag = f"[UID:{uid}]"
+        same_uid = supabase.table("patient_queue").select("*").ilike("notes", f"%{uid_tag}%").execute().data or []
+        if same_uid:
+            return jsonify({"message": "Action déjà enregistrée", "created": False, "patient": enrich_queue_rows(same_uid)[0]}), 200
+
         # Idempotence : un patient ne peut avoir qu'une entrée active par défaut.
         existing = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).in_("status", ACTIVE_QUEUE_STATUSES).order("updated_at", desc=True).limit(1).execute().data or []
         if existing:
@@ -114,7 +128,7 @@ def register_workflow_routes(app, *, runtime):
             "patient_id": patient_id,
             "status": "waiting",
             "priority": priority,
-            "notes": data.get("notes", ""),
+            "notes": f"{str(data.get('notes') or '').strip()} {uid_tag}".strip(),
             "appointment_id": data.get("appointment_id"),
             "appointment_time": data.get("appointment_time"),
             "arrival_order": arrival_order,

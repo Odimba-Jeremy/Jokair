@@ -1,4 +1,7 @@
 """Routes du module médecin : rendez-vous et ordonnances."""
+from datetime import datetime, timezone
+import re
+import uuid
 
 from flask import Blueprint
 
@@ -6,6 +9,47 @@ from flask import Blueprint
 def register_doctor_routes(app, *, runtime):
     globals().update(runtime)
     doctor = Blueprint("doctor", __name__)
+
+    def doctor_owns_appointment(appointment_id):
+        rows = supabase.table(TABLES["appointments"]).select("*").eq("id", appointment_id).execute().data or []
+        if not rows:
+            return None
+        appointment = rows[0]
+        if g.current_user.get("role") == "docteur" and str(appointment.get("doctor_id") or "") != str(g.current_user.get("id") or ""):
+            return False
+        return appointment
+
+    def appointment_uid(data):
+        supplied = str(data.get("uid") or "").strip().upper()
+        if supplied and re.fullmatch(r"[A-Z0-9-]{8,80}", supplied):
+            return supplied
+        return f"RDV-{now_iso()[:10].replace('-', '')}-{uuid.uuid4().hex[:8].upper()}"
+
+    def parse_appointment_time(value):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def appointment_conflict(patient_id, doctor_id, starts_at, duration, ignore_id=None):
+        """Retourne le premier créneau actif qui chevauche le rendez-vous proposé."""
+        end_at = starts_at.timestamp() + duration * 60
+        rows = supabase.table(TABLES["appointments"]).select("id,patient_id,doctor_id,date,duration,status").in_("status", ["scheduled", "arrived", "in_consultation"]).execute().data or []
+        for row in rows:
+            if ignore_id and str(row.get("id")) == str(ignore_id):
+                continue
+            same_doctor = str(row.get("doctor_id") or "") == str(doctor_id)
+            same_patient = str(row.get("patient_id") or "") == str(patient_id)
+            if not (same_doctor or same_patient):
+                continue
+            existing_start = parse_appointment_time(row.get("date"))
+            if not existing_start:
+                continue
+            existing_end = existing_start.timestamp() + max(to_int(row.get("duration"), 30), 1) * 60
+            if starts_at.timestamp() < existing_end and existing_start.timestamp() < end_at:
+                return row, "médecin" if same_doctor else "patient"
+        return None, None
 
     @app.route("/api/appointments", methods=["GET"])
     @roles_required(*ROLES["staff"])
@@ -18,6 +62,8 @@ def register_doctor_routes(app, *, runtime):
         limit = min(max(to_int(request.args.get("limit"), 100), 1), 500)
         offset = to_int(request.args.get("offset"), 0)
         query = supabase.table(TABLES["appointments"]).select("*")
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("doctor_id", g.current_user.get("id"))
         if status:
             query = query.eq("status", status)
         if patient_id:
@@ -42,38 +88,76 @@ def register_doctor_routes(app, *, runtime):
         for field in required:
             if not data.get(field):
                 return jsonify({"error": f"Champ {field} requis"}), 422
+        starts_at = parse_appointment_time(data.get("date"))
+        if not starts_at:
+            return jsonify({"error": "Date et heure de rendez-vous invalides"}), 422
+        duration = min(max(to_int(data.get("duration"), 30), 5), 480)
+        assigned_doctor_id = g.current_user["id"] if g.current_user.get("role") == "docteur" else (data.get("doctor_id") or g.current_user["id"])
+        uid = appointment_uid(data)
+        uid_tag = f"[UID:{uid}]"
+        existing_uid = supabase.table(TABLES["appointments"]).select("*").ilike("notes", f"%{uid_tag}%").execute().data or []
+        if existing_uid:
+            return jsonify(existing_uid[0]), 200
+        conflict, conflict_kind = appointment_conflict(data.get("patient_id"), assigned_doctor_id, starts_at, duration)
+        if conflict:
+            label = "Ce médecin" if conflict_kind == "médecin" else "Ce patient"
+            return jsonify({"error": f"{label} a déjà un rendez-vous qui chevauche ce créneau", "conflict_id": conflict.get("id")}), 409
+        notes = str(data.get("notes") or "").strip()
+        notes = f"{notes}\n{uid_tag}".strip() if uid_tag not in notes else notes
         appointment = {
             "patient_id": to_int(data.get("patient_id")),
             "date": data.get("date"),
             "type": data.get("type"),
-            "duration": to_int(data.get("duration"), 30),
-            "notes": data.get("notes", ""),
+            "duration": duration,
+            "notes": notes,
             "status": normalize_status(data.get("status", "scheduled"), ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled"),
             "priority": normalize_status(data.get("priority", "normal"), ["normal", "urgent"], "normal"),
-            "doctor_id": data.get("doctor_id") or g.current_user["id"],
-            "doctor_name": data.get("doctor_name") or g.current_user["name"],
+            "doctor_id": assigned_doctor_id,
+            "doctor_name": g.current_user["name"] if g.current_user.get("role") == "docteur" else (data.get("doctor_name") or g.current_user["name"]),
             "created_at": now_iso(),
             "updated_at": now_iso()
         }
         result = compatible_insert(TABLES["appointments"], appointment)
         add_audit("CREATE", "appointment", f"RDV #{result.data[0]['id']}", result.data[0]["id"])
         invalidate_cache()
-        return jsonify(result.data[0]), 201
+        created = result.data[0]
+        created["uid"] = uid
+        return jsonify(created), 201
 
     @app.route("/api/appointments/<int:appointment_id>", methods=["GET"])
     @roles_required(*ROLES["staff"])
     def get_appointment(appointment_id: int):
-        result = supabase.table(TABLES["appointments"]).select("*").eq("id", appointment_id).execute()
-        if not result.data:
+        appointment = doctor_owns_appointment(appointment_id)
+        if appointment is None:
             return jsonify({"error": "Rendez-vous introuvable"}), 404
-        return jsonify(result.data[0])
+        if appointment is False:
+            return jsonify({"error": "Rendez-vous non attribué à ce médecin"}), 403
+        return jsonify(appointment)
 
     @app.route("/api/appointments/<int:appointment_id>", methods=["PUT"])
     @roles_required("super_admin", "docteur", "infirmier", "reception")
     def update_appointment(appointment_id: int):
+        owned = doctor_owns_appointment(appointment_id)
+        if owned is None:
+            return jsonify({"error": "Rendez-vous introuvable"}), 404
+        if owned is False:
+            return jsonify({"error": "Rendez-vous non attribué à ce médecin"}), 403
         data = fast_json()
         allowed = ["date", "type", "duration", "status", "priority", "notes", "doctor_id", "doctor_name"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
+        if g.current_user.get("role") == "docteur":
+            # Un médecin ne peut pas transférer un rendez-vous par simple PUT.
+            updates.pop("doctor_id", None)
+            updates.pop("doctor_name", None)
+        proposed_start = parse_appointment_time(updates.get("date") or owned.get("date"))
+        proposed_duration = min(max(to_int(updates.get("duration"), to_int(owned.get("duration"), 30)), 5), 480)
+        if not proposed_start:
+            return jsonify({"error": "Date et heure de rendez-vous invalides"}), 422
+        if "date" in updates or "duration" in updates:
+            conflict, conflict_kind = appointment_conflict(owned.get("patient_id"), owned.get("doctor_id"), proposed_start, proposed_duration, appointment_id)
+            if conflict:
+                label = "Ce médecin" if conflict_kind == "médecin" else "Ce patient"
+                return jsonify({"error": f"{label} a déjà un rendez-vous qui chevauche ce créneau", "conflict_id": conflict.get("id")}), 409
         if "status" in updates:
             updates["status"] = normalize_status(updates["status"], ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled")
         updates["updated_at"] = now_iso()
@@ -87,9 +171,23 @@ def register_doctor_routes(app, *, runtime):
     @app.route("/api/appointments/<int:appointment_id>", methods=["PATCH"])
     @roles_required("super_admin", "docteur", "infirmier", "reception")
     def patch_appointment(appointment_id: int):
+        owned = doctor_owns_appointment(appointment_id)
+        if owned is None:
+            return jsonify({"error": "Rendez-vous introuvable"}), 404
+        if owned is False:
+            return jsonify({"error": "Rendez-vous non attribué à ce médecin"}), 403
         data = fast_json()
         allowed = ["status", "date", "type", "duration", "priority", "notes"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
+        proposed_start = parse_appointment_time(updates.get("date") or owned.get("date"))
+        proposed_duration = min(max(to_int(updates.get("duration"), to_int(owned.get("duration"), 30)), 5), 480)
+        if not proposed_start:
+            return jsonify({"error": "Date et heure de rendez-vous invalides"}), 422
+        if "date" in updates or "duration" in updates:
+            conflict, conflict_kind = appointment_conflict(owned.get("patient_id"), owned.get("doctor_id"), proposed_start, proposed_duration, appointment_id)
+            if conflict:
+                label = "Ce médecin" if conflict_kind == "médecin" else "Ce patient"
+                return jsonify({"error": f"{label} a déjà un rendez-vous qui chevauche ce créneau", "conflict_id": conflict.get("id")}), 409
         if "status" in updates:
             updates["status"] = normalize_status(updates["status"], ["scheduled", "arrived", "in_consultation", "completed", "cancelled"], "scheduled")
         if not updates:

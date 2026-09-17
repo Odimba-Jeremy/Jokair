@@ -1,6 +1,7 @@
 """Routes de soins partagées entre médecin, infirmier et pharmacie."""
 
 from flask import Blueprint
+import uuid
 
 
 def register_medical_routes(app, *, runtime):
@@ -11,7 +12,10 @@ def register_medical_routes(app, *, runtime):
     @roles_required(*ROLES["staff"])
     @cached(60)
     def get_care_logs():
-        result = supabase.table(TABLES["care"]).select("*").order("created_at", desc=True).execute()
+        query = supabase.table(TABLES["care"]).select("*")
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("performed_by", g.current_user.get("id"))
+        result = query.order("created_at", desc=True).execute()
         care_logs = result.data or []
         patients = get_patient_map()
         rows = []
@@ -65,6 +69,10 @@ def register_medical_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "infirmier")
     def update_care_log(care_id: int):
         data = fast_json()
+        if g.current_user.get("role") == "docteur":
+            owned = supabase.table(TABLES["care"]).select("id").eq("id", care_id).eq("performed_by", g.current_user.get("id")).execute().data or []
+            if not owned:
+                return jsonify({"error": "Soin non attribué à ce médecin"}), 403
         updates = {}
         if "care_type" in data:
             updates["care_type"] = data["care_type"]
@@ -86,6 +94,10 @@ def register_medical_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "infirmier")
     def patch_care_log(care_id: int):
         data = fast_json()
+        if g.current_user.get("role") == "docteur":
+            owned = supabase.table(TABLES["care"]).select("id").eq("id", care_id).eq("performed_by", g.current_user.get("id")).execute().data or []
+            if not owned:
+                return jsonify({"error": "Soin non attribué à ce médecin"}), 403
         allowed = ["status", "priority", "description"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
 
@@ -170,8 +182,8 @@ def register_medical_routes(app, *, runtime):
             dur_d = dur_d or 1
             tot_occ = max(1, (dur_d * 24) // freq_h)
 
-            doc_name = data.get("doctor_name") or g.current_user.get("name", "")
-            doc_id = data.get("doctor_id") or g.current_user.get("id")
+            doc_name = g.current_user.get("name", "") if g.current_user.get("role") == "docteur" else (data.get("doctor_name") or g.current_user.get("name", ""))
+            doc_id = g.current_user.get("id") if g.current_user.get("role") == "docteur" else (data.get("doctor_id") or g.current_user.get("id"))
             patient_name = data.get("patient_name", "")
 
             main_title = ""
@@ -182,7 +194,14 @@ def register_medical_routes(app, *, runtime):
             else:
                 main_title = "Séance de soins"
 
+            supplied_uid = str(data.get("uid") or "").strip().upper()
+            session_uid = supplied_uid if supplied_uid else f"SOIN-{now_iso()[:10].replace('-', '')}-{uuid.uuid4().hex[:8].upper()}"
+            if supplied_uid:
+                same_uid = supabase.table(TABLES["care"]).select("*").ilike("description", f"%{session_uid}%").execute().data or []
+                if same_uid:
+                    return jsonify({"items": [same_uid[0]]}), 200
             session_meta = {
+                "uid": session_uid,
                 "is_session": True,
                 "title": main_title,
                 "patient_id": patient_id,
@@ -220,7 +239,10 @@ def register_medical_routes(app, *, runtime):
             invalidate_cache()
             return jsonify({"items": [created_row], "session": session_meta}), 201
 
-        result = supabase.table(TABLES["care"]).select("*").order("created_at", desc=True).execute()
+        query = supabase.table(TABLES["care"]).select("*")
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("performed_by", g.current_user.get("id"))
+        result = query.order("created_at", desc=True).execute()
         patients = get_patient_map()
         rows = []
         for row in result.data or []:
@@ -282,7 +304,11 @@ def register_medical_routes(app, *, runtime):
     @app.route("/api/care/pending", methods=["GET"])
     @roles_required(*ROLES["staff"])
     def get_care_pending():
-        result = supabase.table(TABLES["care"]).select("*").in_("status", ["pending", "scheduled", "due", "in_progress", "active"]).order("created_at", desc=True).execute()
+        # Un soin livré par la pharmacie est prêt à être administré par l'infirmier.
+        query = supabase.table(TABLES["care"]).select("*").in_("status", ["pending", "scheduled", "due", "in_progress", "active", "delivered"])
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("performed_by", g.current_user.get("id"))
+        result = query.order("created_at", desc=True).execute()
         patients = get_patient_map()
         rows = []
         for row in (result.data or []):
@@ -303,7 +329,10 @@ def register_medical_routes(app, *, runtime):
     @app.route("/api/care/history", methods=["GET"])
     @roles_required(*ROLES["staff"])
     def get_care_history():
-        result = supabase.table(TABLES["care"]).select("*").in_("status", ["completed", "cancelled", "missed", "refused", "administered"]).order("updated_at", desc=True).execute()
+        query = supabase.table(TABLES["care"]).select("*").in_("status", ["completed", "cancelled", "missed", "refused", "administered"])
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("performed_by", g.current_user.get("id"))
+        result = query.order("updated_at", desc=True).execute()
         patients = get_patient_map()
         rows = []
         for row in (result.data or []):
