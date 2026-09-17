@@ -109,6 +109,12 @@ def register_medical_routes(app, *, runtime):
                     if mk in data and data[mk] is not None:
                         meta[mk] = data[mk]
 
+                admin_rec = data.get("admin_record")
+                if admin_rec and isinstance(admin_rec, dict):
+                    if "administrations" not in meta or not isinstance(meta["administrations"], list):
+                        meta["administrations"] = []
+                    meta["administrations"].append(admin_rec)
+
                 cur_occ = to_int(meta.get("current_occurrence")) or 1
                 tot_occ = to_int(meta.get("total_occurrences")) or 1
                 if cur_occ > tot_occ:
@@ -145,48 +151,75 @@ def register_medical_routes(app, *, runtime):
             patient_id = to_int(data.get("patient_id"))
             if not patient_id:
                 return jsonify({"error": "Patient requis"}), 422
-            items = []
-            for category, values in (("injectable", data.get("injectables") or []), ("consommable", data.get("consumables") or []), ("acte", data.get("acts") or [])):
-                for value in values:
-                    item = dict(value or {})
-                    item["category"] = category
-                    item["patient_name"] = data.get("patient_name", "")
-                    item["prescribed_by"] = data.get("doctor_name") or g.current_user.get("name", "")
-                    item["doctor_id"] = data.get("doctor_id") or g.current_user.get("id")
 
-                    # Calcul du moteur d'occurrences pour injectables et actes
-                    freq_h = to_int(item.get("frequency_hours")) or 8
-                    dur_d = to_int(item.get("duration_days")) or 1
-                    tot_occ = to_int(item.get("total_occurrences")) or max(1, (dur_d * 24) // freq_h)
-                    item["frequency_hours"] = freq_h
-                    item["duration_days"] = dur_d
-                    item["total_occurrences"] = tot_occ
-                    item["current_occurrence"] = to_int(item.get("current_occurrence")) or 1
-                    item["next_due_at"] = now_iso()
-                    item["administrations"] = []
+            acts = data.get("acts") or []
+            injectables = data.get("injectables") or []
+            consumables = data.get("consumables") or []
 
-                    items.append(item)
-            if not items:
+            if not acts and not injectables and not consumables:
                 return jsonify({"error": "Au moins un soin est requis"}), 422
-            created = []
-            for item in items:
-                care = {
-                    "patient_id": patient_id,
-                    "care_type": item.get("category", "soin"),
-                    "description": json.dumps(item, ensure_ascii=False),
-                    "priority": "normal",
-                    "status": data.get("status", "pending"),
-                    "date": now_iso(),
-                    "performed_by": g.current_user["id"],
-                    "performed_by_name": g.current_user["name"],
-                    "created_at": now_iso(),
-                    "updated_at": now_iso(),
-                }
-                result = compatible_insert(TABLES["care"], care)
-                created.append(result.data[0] if result.data else care)
-            add_audit("CREATE", "care", f"Prescription de soins ({len(created)} élément(s))", patient_id)
+
+            freq_h = to_int(data.get("frequency_hours"))
+            dur_d = to_int(data.get("duration_days"))
+            for item in (injectables + acts):
+                if not freq_h and item.get("frequency_hours"):
+                    freq_h = to_int(item.get("frequency_hours"))
+                if not dur_d and item.get("duration_days"):
+                    dur_d = to_int(item.get("duration_days"))
+            freq_h = freq_h or 8
+            dur_d = dur_d or 1
+            tot_occ = max(1, (dur_d * 24) // freq_h)
+
+            doc_name = data.get("doctor_name") or g.current_user.get("name", "")
+            doc_id = data.get("doctor_id") or g.current_user.get("id")
+            patient_name = data.get("patient_name", "")
+
+            main_title = ""
+            if acts:
+                main_title = acts[0].get("name") or acts[0].get("product_name") or "Acte de soin"
+            elif injectables:
+                main_title = injectables[0].get("product_name") or injectables[0].get("name") or "Injection"
+            else:
+                main_title = "Séance de soins"
+
+            session_meta = {
+                "is_session": True,
+                "title": main_title,
+                "patient_id": patient_id,
+                "patient_name": patient_name,
+                "doctor_id": doc_id,
+                "prescribed_by": doc_name,
+                "acts": acts,
+                "injectables": injectables,
+                "consumables": consumables,
+                "frequency_hours": freq_h,
+                "duration_days": dur_d,
+                "total_occurrences": tot_occ,
+                "current_occurrence": 1,
+                "next_due_at": None,
+                "last_administered_at": None,
+                "last_administered_by": None,
+                "administrations": []
+            }
+
+            care = {
+                "patient_id": patient_id,
+                "care_type": "seance_soin",
+                "description": json.dumps(session_meta, ensure_ascii=False),
+                "priority": data.get("priority", "normal"),
+                "status": data.get("status", "pending"),
+                "date": now_iso(),
+                "performed_by": g.current_user["id"],
+                "performed_by_name": g.current_user["name"],
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+            result = compatible_insert(TABLES["care"], care)
+            created_row = result.data[0] if result.data else care
+            add_audit("CREATE", "care", f"Prescription séance de soins #{patient_id}", patient_id)
             invalidate_cache()
-            return jsonify({"items": created}), 201
+            return jsonify({"items": [created_row], "session": session_meta}), 201
+
         result = supabase.table(TABLES["care"]).select("*").order("created_at", desc=True).execute()
         patients = get_patient_map()
         rows = []
@@ -195,6 +228,32 @@ def register_medical_routes(app, *, runtime):
                 metadata = json.loads(row.get("description") or "{}")
             except (TypeError, ValueError):
                 metadata = {}
+
+            if metadata.get("is_session") or row.get("care_type") == "seance_soin":
+                doc_name = metadata.get("prescribed_by") or row.get("performed_by_name") or "Médecin"
+                pat_name = patients.get(row.get("patient_id"), metadata.get("patient_name") or "Inconnu")
+                for inj in metadata.get("injectables") or []:
+                    rows.append({
+                        **row,
+                        **inj,
+                        "category": "injectable",
+                        "prescribed_by": doc_name,
+                        "patient_name": pat_name,
+                        "session_id": row.get("id"),
+                        "product_name": inj.get("product_name") or inj.get("name") or "Injectable"
+                    })
+                for cons in metadata.get("consumables") or []:
+                    rows.append({
+                        **row,
+                        **cons,
+                        "category": "consommable",
+                        "prescribed_by": doc_name,
+                        "patient_name": pat_name,
+                        "session_id": row.get("id"),
+                        "product_name": cons.get("product_name") or cons.get("name") or "Consommable"
+                    })
+                continue
+
             category = metadata.get("category") or row.get("category") or row.get("care_type")
             if category not in ("injectable", "consommable"):
                 continue
@@ -235,8 +294,9 @@ def register_medical_routes(app, *, runtime):
                 except Exception:
                     metadata = {}
             item = {**row, **metadata}
-            item["patient_name"] = patients.get(item.get("patient_id"), "Inconnu")
-            item["product_name"] = item.get("product_name") or item.get("medication") or item.get("care_type") or "Soin"
+            item["patient_name"] = patients.get(item.get("patient_id"), metadata.get("patient_name") or "Inconnu")
+            item["product_name"] = metadata.get("title") or item.get("product_name") or item.get("medication") or item.get("care_type") or "Soin"
+            item["prescribed_by"] = metadata.get("prescribed_by") or row.get("performed_by_name") or "Médecin"
             rows.append(item)
         return jsonify(rows)
 
@@ -255,8 +315,9 @@ def register_medical_routes(app, *, runtime):
                 except Exception:
                     metadata = {}
             item = {**row, **metadata}
-            item["patient_name"] = patients.get(item.get("patient_id"), "Inconnu")
-            item["product_name"] = item.get("product_name") or item.get("medication") or item.get("care_type") or "Soin"
+            item["patient_name"] = patients.get(item.get("patient_id"), metadata.get("patient_name") or "Inconnu")
+            item["product_name"] = metadata.get("title") or item.get("product_name") or item.get("medication") or item.get("care_type") or "Soin"
+            item["prescribed_by"] = metadata.get("prescribed_by") or row.get("performed_by_name") or "Médecin"
             rows.append(item)
         return jsonify(rows)
 
