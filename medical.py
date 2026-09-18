@@ -262,7 +262,10 @@ def register_medical_routes(app, *, runtime):
                         "prescribed_by": doc_name,
                         "patient_name": pat_name,
                         "session_id": row.get("id"),
-                        "product_name": inj.get("product_name") or inj.get("name") or "Injectable"
+                        "product_name": inj.get("product_name") or inj.get("name") or "Injectable",
+                        # L'ID de la séance doit rester celui de care_logs, jamais
+                        # l'ID éventuel du produit / de l'acte dans les métadonnées.
+                        "id": row.get("id")
                     })
                 for cons in metadata.get("consumables") or []:
                     rows.append({
@@ -272,14 +275,18 @@ def register_medical_routes(app, *, runtime):
                         "prescribed_by": doc_name,
                         "patient_name": pat_name,
                         "session_id": row.get("id"),
-                        "product_name": cons.get("product_name") or cons.get("name") or "Consommable"
+                        "product_name": cons.get("product_name") or cons.get("name") or "Consommable",
+                        "id": row.get("id")
                     })
                 continue
 
             category = metadata.get("category") or row.get("category") or row.get("care_type")
             if category not in ("injectable", "consommable"):
                 continue
-            item = {**row, **metadata}
+            # Ne jamais laisser les métadonnées écraser l'ID de la ligne SQL.
+            # Sinon un identifiant métier comme ACT006 est envoyé à la route
+            # /api/care/<int:care_id> et l'administration échoue en 404.
+            item = {**metadata, **row}
             item["category"] = category
             item["product_name"] = item.get("product_name") or item.get("medication") or item.get("care_type")
             item["patient_name"] = patients.get(item.get("patient_id"), "Inconnu")
@@ -319,7 +326,8 @@ def register_medical_routes(app, *, runtime):
                     metadata = json.loads(desc)
                 except Exception:
                     metadata = {}
-            item = {**row, **metadata}
+            # Garder l'ID numérique persisté pour PATCH /api/care/<int:id>.
+            item = {**metadata, **row}
             item["patient_name"] = patients.get(item.get("patient_id"), metadata.get("patient_name") or "Inconnu")
             item["product_name"] = metadata.get("title") or item.get("product_name") or item.get("medication") or item.get("care_type") or "Soin"
             item["prescribed_by"] = metadata.get("prescribed_by") or row.get("performed_by_name") or "Médecin"
