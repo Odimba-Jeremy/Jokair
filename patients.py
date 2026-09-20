@@ -21,7 +21,7 @@ def register_patient_routes(
     def get_patients():
         search = request.args.get("search", "").strip().lower()
         context = request.args.get("context", "").strip().lower()
-        numeric_search = re.fullmatch(r"(?:ih-ushd-)?0*(\d+)", search, re.IGNORECASE)
+        numeric_search = re.fullmatch(r"(?:hb-ushd-|ih-ushd-|ih-usd-)?0*(\d+)", search, re.IGNORECASE)
 
         page_arg = request.args.get("page")
         limit_arg = request.args.get("limit")
@@ -247,5 +247,71 @@ def register_patient_routes(
             return jsonify({"patient_id": patient_id, "qr_code": f"data:image/png;base64,{image_data}", "data": qr_data})
         except ImportError:
             return jsonify({"patient_id": patient_id, "qr_code": None, "data": qr_data, "error": "Bibliothèque qrcode non installée"})
+
+    @patients.get("/api/patients/<int:patient_id>/care-history")
+    @roles_required(*roles["staff"])
+    def get_patient_care_history(patient_id: int):
+        """Historique complet des soins prescrits et administrés pour le patient."""
+        care_rows = supabase.table(tables["care"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+        admin_rows = supabase.table("medication_administrations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+        return jsonify({
+            "prescriptions_care": care_rows,
+            "administrations": admin_rows
+        })
+
+    @patients.get("/api/patients/<int:patient_id>/full-record")
+    @roles_required(*roles["staff"])
+    def get_patient_full_record(patient_id: int):
+        """Dossier patient médical complet agrégeant toutes les étapes du parcours clinique."""
+        if patient_id <= 0:
+            return jsonify({"error": "ID patient invalide"}), 400
+
+        # 1. Infos patient de base
+        p_res = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
+        if not p_res.data:
+            return jsonify({"error": "Patient introuvable"}), 404
+        patient = enrich_patient_identifier(add_pregnancy_flags(p_res.data)[0])
+        if not can_access_patient_record(patient):
+            return jsonify({"error": "Accès patient non autorisé"}), 403
+
+        # 2. Consultations médicales (symptômes, diagnostic, observations, notes, etc.)
+        consultations = supabase.table("medical_consultations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 3. Prescriptions médicamenteuses
+        prescriptions = supabase.table(tables["prescriptions"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 4. Soins infirmiers prescrits et séances de soins
+        care_logs = supabase.table(tables["care"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 5. Administrations effectives de soins
+        administrations = supabase.table("medication_administrations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 6. Résultats d'analyses de laboratoire
+        lab_results = supabase.table(tables["lab_tests"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 7. Signes vitaux (constantes)
+        vitals = supabase.table("vital_signs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 8. Hospitalisations et lits
+        hospitalizations = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 9. Suivis médicaux
+        followups = supabase.table("medical_followups").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        # 10. Factures
+        invoices = supabase.table(tables["billing"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+
+        return jsonify({
+            "patient": patient,
+            "consultations": consultations,
+            "prescriptions": prescriptions,
+            "care_logs": care_logs,
+            "administrations": administrations,
+            "lab_results": lab_results,
+            "vitals": vitals,
+            "hospitalizations": hospitalizations,
+            "followups": followups,
+            "invoices": invoices
+        })
 
     app.register_blueprint(patients)
