@@ -3,7 +3,7 @@
 Le module ne possède pas de client Supabase global : l'application lui injecte
 ses dépendances au démarrage. Cela évite les imports circulaires avec app.py.
 """
-from flask import Blueprint, jsonify, g
+from flask import Blueprint, jsonify, g, request
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
