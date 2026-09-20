@@ -1,15 +1,14 @@
-"""Service d'envoi d'e-mails I-HUB via Google/Gmail SMTP.
+"""Service d'envoi d'e-mails I-HUB via l'API Resend.
 
-Permet l'envoi sécurisé avec mot de passe d'application Google (App Password)
-pour les invitations, réinitialisations de mot de passe et notifications.
+Utilise HTTPS plutôt que SMTP afin d'être compatible avec les hébergements qui
+bloquent les ports SMTP sortants.
 """
 
 from __future__ import annotations
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.header import Header
+import json
+import urllib.error
+import urllib.request
 
 # Charger automatiquement le fichier .env si présent
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -21,37 +20,45 @@ if os.path.exists(_env_path):
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
-# Configuration Gmail SMTP
-GMAIL_USER = os.getenv("GMAIL_USER", os.getenv("GMAIL_ADDRESS", "jeremyodimba322@gmail.com"))
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", os.getenv("GMAIL_PASSWORD", "")).replace(" ", "")
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465  # SSL
+# Configuration Resend. RESEND_FROM doit être une adresse/domaine vérifié dans
+# Resend. La valeur par défaut permet uniquement les tests Resend autorisés.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM = os.getenv("RESEND_FROM", "I-Hub <onboarding@resend.dev>").strip()
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 def send_email(to_email: str, subject: str, html_body: str, text_body: str = "") -> bool:
-    """Envoie un email via Gmail SMTP avec SSL sécurisé."""
-    if not GMAIL_APP_PASSWORD:
-        print(f"⚠️ [EmailService] GMAIL_APP_PASSWORD non configuré. Simulation d'envoi à {to_email} : {subject}")
+    """Envoie un e-mail transactionnel via Resend."""
+    if not RESEND_API_KEY:
+        print(f"⚠️ [EmailService] RESEND_API_KEY non configurée. Envoi annulé à {to_email} : {subject}")
         return False
 
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = Header(subject, "utf-8")
-        msg["From"] = f"I-Hub Hôpital <{GMAIL_USER}>"
-        msg["To"] = to_email
-
+        payload = {
+            "from": RESEND_FROM,
+            "to": [to_email],
+            "subject": subject,
+            "html": html_body,
+        }
         if text_body:
-            msg.attach(MIMEText(text_body, "plain", "utf-8"))
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
+            payload["text"] = text_body
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=12) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, [to_email], msg.as_string())
+        request = urllib.request.Request(
+            RESEND_API_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            result = json.loads(response.read().decode("utf-8"))
 
-        print(f"✅ [EmailService] Email envoyé avec succès à {to_email}")
+        print(f"✅ [EmailService] E-mail envoyé avec succès à {to_email} (id: {result.get('id', 'inconnu')})")
         return True
-    except Exception as exc:
-        print(f"❌ [EmailService] Erreur lors de l'envoi à {to_email} : {exc}")
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
+        print(f"❌ [EmailService] Erreur Resend lors de l'envoi à {to_email} : {exc}")
         return False
 
 
