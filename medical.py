@@ -135,34 +135,6 @@ def register_medical_routes(app, *, runtime):
 
                 updates["description"] = json.dumps(meta, ensure_ascii=False)
 
-        # Vérification du blocage pharmacie -> soins :
-        # Si un soin requiert des injectables/consommables et qu'il n'est pas encore livré par la pharmacie,
-        # l'administration doit être bloquée tant que le statut n'est pas 'delivered'.
-        row_res_blocking = supabase.table(TABLES["care"]).select("status, description, care_type").eq("id", care_id).execute()
-        if row_res_blocking.data:
-            current_care_row = row_res_blocking.data[0]
-            curr_status = current_care_row.get("status")
-            desc_val = current_care_row.get("description") or ""
-            parsed_meta = {}
-            if isinstance(desc_val, str) and desc_val.strip().startswith("{"):
-                try:
-                    import json
-                    parsed_meta = json.loads(desc_val)
-                except Exception:
-                    parsed_meta = {}
-            
-            inj_list = parsed_meta.get("injectables") or []
-            cons_list = parsed_meta.get("consumables") or []
-            care_category = parsed_meta.get("category") or current_care_row.get("category") or current_care_row.get("care_type")
-            needs_delivery = bool(inj_list or cons_list or care_category in ("injectable", "consommable"))
-
-            # Si le client essaie d'administrer (has_meta ou nouveau statut avancé) alors que les produits ne sont pas livrés
-            is_administering = bool(has_meta or updates.get("status") in ("in_progress", "completed", "administered"))
-            if needs_delivery and curr_status not in ("delivered", "completed") and updates.get("status") != "cancelled" and is_administering:
-                return jsonify({
-                    "error": "Soin bloqué : les médicaments et produits requis doivent être livrés par la pharmacie avant toute administration."
-                }), 422
-
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
         updates["updated_at"] = now_iso()

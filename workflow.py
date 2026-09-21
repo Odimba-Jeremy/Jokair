@@ -429,32 +429,14 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
-        # Concaténation de sécurité dans 'notes' pour garantir qu'aucune donnée
-        # n'est perdue même si certaines colonnes n'existent pas encore dans le schéma Supabase
-        combined_sections = []
-        if data.get("observations"):
-            combined_sections.append(f"Observations :\n{data.get('observations')}")
-        if data.get("treatment_plan"):
-            combined_sections.append(f"Plan thérapeutique :\n{data.get('treatment_plan')}")
-        if data.get("recommendations") and data.get("recommendations") != data.get("treatment_plan"):
-            combined_sections.append(f"Recommandations :\n{data.get('recommendations')}")
-        if data.get("notes") and data.get("notes") not in data.get("observations", ""):
-            combined_sections.append(f"Notes d'examen :\n{data.get('notes')}")
-
-        full_notes = "\n\n".join(combined_sections) or data.get("notes", "") or data.get("observations", "")
-
         payload = {
             "patient_id": patient_id,
-            "doctor_id": g.current_user["id"],
-            "consulted_at": now_iso(),
             "symptoms": data.get("symptoms", ""),
             "diagnosis": data.get("diagnosis", ""),
             "diagnostics": data.get("diagnostics", []),
             "observations": data.get("observations", ""),
-            "treatment_plan": data.get("treatment_plan", ""),
-            "notes": full_notes,
-            "recommendations": data.get("recommendations", ""),
             "medical_history": data.get("medical_history", ""),
+            "doctor_id": g.current_user["id"],
             "doctor_name": g.current_user["name"],
             "created_at": now_iso(),
             "updated_at": now_iso()

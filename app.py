@@ -15,22 +15,12 @@ import base64
 import hashlib
 import uuid
 
-from flask import Flask, jsonify, request, g, send_file, Response, send_from_directory
+from flask import Flask, jsonify, request, g, send_file, Response
 from flask_cors import CORS
 from flask_caching import Cache
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from supabase import create_client, Client
 from werkzeug.security import generate_password_hash, check_password_hash
-
-# ==================== ENV LOADING ====================
-_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-if os.path.exists(_env_path):
-    with open(_env_path, "r", encoding="utf-8") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 # ==================== CACHE CONFIGURATION ====================
 REDIS_URL = os.getenv("REDIS_URL", "")
@@ -262,7 +252,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def hospital_patient_id(patient_id: Any) -> str:
-    return f"HB-USHD-{to_int(patient_id):06d}"
+    return f"IH-USD-{to_int(patient_id):05d}"
 
 def enrich_patient_identifier(patient: dict) -> dict:
     patient = dict(patient)
@@ -759,7 +749,7 @@ def get_tarif_code_for_care(care_type):
 def generate_barcode_svg(patient_id: int, patient_name: str) -> str:
     from datetime import datetime
     
-    patient_id_str = f"HB-USHD-{patient_id:06d}"
+    patient_id_str = f"IH-USD-{patient_id:05d}"
     now = datetime.now().strftime("%d/%m/%Y")
     
     bars = []
@@ -789,7 +779,7 @@ def generate_barcode_svg(patient_id: int, patient_name: str) -> str:
 # ==================== GENERATE QR CODE ====================
 def generate_qr_code_data(patient_id: int, patient_name: str, phone: str = "") -> str:
     """Génère les données pour un QR code"""
-    return f"HB-USHD-{patient_id:06d}|{patient_name}|{phone}"
+    return f"IH-USD-{patient_id:05d}|{patient_name}|{phone}"
 
 # ==================== DISPATCH INFERMIER ====================
 
@@ -818,21 +808,6 @@ def release_box(box_id: int):
 def health():
     return jsonify({"status": "ok", "timestamp": now_iso(), "version": "2.0.0"})
 
-# ==================== PAGES STATIQUES AUTH / INVITATION ====================
-BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-
-@app.route("/accept-invite.html", methods=["GET"])
-def serve_accept_invite():
-    return send_from_directory(BACKEND_DIR, "accept-invite.html")
-
-@app.route("/reset-password.html", methods=["GET"])
-def serve_reset_password():
-    return send_from_directory(BACKEND_DIR, "reset-password.html")
-
-@app.route("/forgot-password.html", methods=["GET"])
-def serve_forgot_password():
-    return send_from_directory(BACKEND_DIR, "forgot-password.html")
-
 # ==================== MATERNITÉ ROUTES ====================
 
 # ==================== MODULES ROUTES ====================
@@ -852,7 +827,6 @@ try:
     from .admin import register_admin_routes
     from .pediatrics import register_pediatrics_routes
     from .ai import register_ai_routes
-    from .events import register_events_routes, broadcast_event
 except ImportError:
     from auth import register_auth_routes
     from patients import register_patient_routes
@@ -867,7 +841,6 @@ except ImportError:
     from admin import register_admin_routes
     from pediatrics import register_pediatrics_routes
     from ai import register_ai_routes
-    from events import register_events_routes, broadcast_event
 
 register_auth_routes(app, fast_json=fast_json, supabase=supabase, tables=TABLES,
                      roles=ROLES, now_iso=now_iso, create_token=create_token,
@@ -898,7 +871,6 @@ register_medical_routes(app, runtime=globals())
 register_admin_routes(app, runtime=globals())
 register_pediatrics_routes(app, runtime=globals())
 register_ai_routes(app, runtime=globals())
-register_events_routes(app)
 
 
 if __name__ == "__main__":

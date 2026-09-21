@@ -139,7 +139,8 @@ def register_maternity_routes(app, *, runtime):
     @roles_required("super_admin", "infirmier", "docteur", "reception")
     def get_pregnancy_followups(pregnancy_id: int):
         query = supabase.table("prenatal_consultations").select("*").eq("pregnancy_id", pregnancy_id)
-        # NB: pas de filtre doctor_id en lecture — le docteur doit voir toutes les CPN
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("doctor_id", g.current_user.get("id"))
         result = query.order("visit_date", desc=True).execute()
         return jsonify(result.data)
 
@@ -150,8 +151,8 @@ def register_maternity_routes(app, *, runtime):
         patient_id = request.args.get("patient_id")
         pregnancy_id = request.args.get("pregnancy_id")
         query = supabase.table("prenatal_consultations").select("*")
-        # NB: pas de filtre doctor_id en lecture — le docteur doit voir toutes les CPN de la grossesse
-
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("doctor_id", g.current_user.get("id"))
         if patient_id:
             query = query.eq("patient_id", to_int(patient_id))
         if pregnancy_id:
