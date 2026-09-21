@@ -248,4 +248,64 @@ def register_patient_routes(
         except ImportError:
             return jsonify({"patient_id": patient_id, "qr_code": None, "data": qr_data, "error": "Bibliothèque qrcode non installée"})
 
+    @patients.route("/<int:patient_id>/full-record", methods=["GET"])
+    @roles_required("super_admin", "admin", "docteur", "infirmier", "reception", "laboratoire", "pharmacie")
+    def get_full_patient_record(patient_id: int):
+        """Récupère l'intégralité du dossier médical d'un patient sans perte d'information."""
+        p_res = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
+        if not p_res.data:
+            return jsonify({"error": "Patient introuvable"}), 404
+
+        patient_info = enrich_patient_identifier(p_res.data[0])
+
+        # 1. Consultations
+        consultations = []
+        try:
+            c_res = supabase.table("medical_consultations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            consultations = c_res.data or []
+        except Exception:
+            pass
+
+        # 2. Prescriptions / Ordonnances
+        prescriptions = []
+        try:
+            pr_res = supabase.table("prescriptions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            prescriptions = pr_res.data or []
+        except Exception:
+            pass
+
+        # 3. Protocoles de soins et logs
+        care_logs = []
+        try:
+            care_res = supabase.table("care").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            care_logs = care_res.data or []
+        except Exception:
+            pass
+
+        # 4. Examens de laboratoire
+        lab_tests = []
+        try:
+            lab_res = supabase.table("laboratory_examinations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            lab_tests = lab_res.data or []
+        except Exception:
+            pass
+
+        # 5. Hospitalisation / Lits
+        hospitalisation = None
+        try:
+            box_res = supabase.table("medical_boxes").select("*").eq("patient_id", patient_id).execute()
+            if box_res.data:
+                hospitalisation = box_res.data[0]
+        except Exception:
+            pass
+
+        return jsonify({
+            "patient": patient_info,
+            "consultations": consultations,
+            "prescriptions": prescriptions,
+            "care_logs": care_logs,
+            "lab_tests": lab_tests,
+            "hospitalisation": hospitalisation
+        })
+
     app.register_blueprint(patients)

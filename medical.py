@@ -135,6 +135,20 @@ def register_medical_routes(app, *, runtime):
 
                 updates["description"] = json.dumps(meta, ensure_ascii=False)
 
+        # Vérification du blocage pharmacie (Point 8) : si des produits sont requis et non encore livrés
+        if g.current_user.get("role") == "infirmier" and (data.get("admin_record") or data.get("current_occurrence")):
+            care_row = supabase.table(TABLES["care"]).select("description, status").eq("id", care_id).execute()
+            if care_row.data:
+                desc_val = care_row.data[0].get("description") or "{}"
+                try:
+                    desc_obj = json.loads(desc_val) if desc_val.strip().startswith("{") else {}
+                except Exception:
+                    desc_obj = {}
+                has_products = bool(desc_obj.get("injectables") or desc_obj.get("consumables") or desc_obj.get("requires_pharmacy"))
+                pharm_status = desc_obj.get("pharmacy_status") or desc_obj.get("delivery_status") or care_row.data[0].get("status")
+                if has_products and pharm_status not in ("delivered", "dispensed", "completed"):
+                    return jsonify({"error": "Soin bloqué : les produits pharmaceutiques doivent d'abord être livrés par la pharmacie."}), 422
+
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
         updates["updated_at"] = now_iso()

@@ -429,15 +429,31 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+        combined_notes = []
+        if data.get("observations"):
+            combined_notes.append(f"Observations: {data.get('observations')}")
+        if data.get("treatment_plan"):
+            combined_notes.append(f"Plan de traitement: {data.get('treatment_plan')}")
+        if data.get("recommendations"):
+            combined_notes.append(f"Recommandations: {data.get('recommendations')}")
+        if data.get("notes"):
+            combined_notes.append(f"Notes: {data.get('notes')}")
+
+        full_notes = "\n\n".join(combined_notes) if combined_notes else (data.get("notes") or data.get("observations") or "")
+
         payload = {
             "patient_id": patient_id,
             "symptoms": data.get("symptoms", ""),
             "diagnosis": data.get("diagnosis", ""),
             "diagnostics": data.get("diagnostics", []),
             "observations": data.get("observations", ""),
+            "treatment_plan": data.get("treatment_plan", ""),
+            "recommendations": data.get("recommendations", ""),
+            "notes": full_notes,
             "medical_history": data.get("medical_history", ""),
             "doctor_id": g.current_user["id"],
             "doctor_name": g.current_user["name"],
+            "consulted_at": now_iso(),
             "created_at": now_iso(),
             "updated_at": now_iso()
         }

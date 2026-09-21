@@ -252,7 +252,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def hospital_patient_id(patient_id: Any) -> str:
-    return f"IH-USD-{to_int(patient_id):05d}"
+    return f"HB-USHD-{to_int(patient_id):06d}"
 
 def enrich_patient_identifier(patient: dict) -> dict:
     patient = dict(patient)
@@ -827,6 +827,8 @@ try:
     from .admin import register_admin_routes
     from .pediatrics import register_pediatrics_routes
     from .ai import register_ai_routes
+    from .events import register_events_routes, broadcast_event
+    from .patient_portal import register_patient_portal_routes
 except ImportError:
     from auth import register_auth_routes
     from patients import register_patient_routes
@@ -841,6 +843,8 @@ except ImportError:
     from admin import register_admin_routes
     from pediatrics import register_pediatrics_routes
     from ai import register_ai_routes
+    from events import register_events_routes, broadcast_event
+    from patient_portal import register_patient_portal_routes
 
 register_auth_routes(app, fast_json=fast_json, supabase=supabase, tables=TABLES,
                      roles=ROLES, now_iso=now_iso, create_token=create_token,
@@ -871,6 +875,12 @@ register_medical_routes(app, runtime=globals())
 register_admin_routes(app, runtime=globals())
 register_pediatrics_routes(app, runtime=globals())
 register_ai_routes(app, runtime=globals())
+register_events_routes(app)
+register_patient_portal_routes(
+    app, supabase=supabase, tables=TABLES, serializer=serializer,
+    hospital_patient_id=hospital_patient_id,
+    enrich_patient_identifier=enrich_patient_identifier,
+)
 
 
 if __name__ == "__main__":
