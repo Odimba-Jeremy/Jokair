@@ -38,7 +38,7 @@ def register_patient_routes(
         if search:
             id_clause = f",id.eq.{int(numeric_search.group(1))}" if numeric_search else ""
             query = supabase.table(tables["patients"]).select("*", count="exact").or_(
-                f"full_name.ilike.%{search}%,phone.ilike.%{search}%,email.ilike.%{search}%{id_clause}"
+                f"full_name.ilike.%{search}%,phone.ilike.%{search}%,email.ilike.%{search}%,hospital_id.ilike.%{search}%{id_clause}"
             ).order("created_at", desc=True)
         else:
             query = supabase.table(tables["patients"]).select("*", count="exact").order("created_at", desc=True)
@@ -97,7 +97,12 @@ def register_patient_routes(
         }
         result = compatible_insert(tables["patients"], patient)
         created_patient = result.data[0]
-        created_patient["hospital_id"] = hospital_patient_id(created_patient.get("id"))
+        hid = hospital_patient_id(created_patient.get("id"))
+        try:
+            supabase.table(tables["patients"]).update({"hospital_id": hid}).eq("id", created_patient["id"]).execute()
+        except Exception as hid_err:
+            print(f"Erreur mise à jour hospital_id #{created_patient.get('id')}: {hid_err}")
+        created_patient["hospital_id"] = hid
         try:
             last = supabase.table("patient_queue").select("arrival_order").order("arrival_order", desc=True).limit(1).execute().data or []
             arrival_order = to_int(last[0].get("arrival_order"), 0) + 1 if last else 1

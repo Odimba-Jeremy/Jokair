@@ -51,17 +51,16 @@ def register_maternity_routes(app, *, runtime):
 
     @maternity.route("/api/maternity/pregnancies", methods=["GET"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")
-    @cached(60)
     def get_pregnancies():
         patient_id = request.args.get("patient_id")
-        status = request.args.get("status", "active")
+        status = request.args.get("status")
         query = supabase.table("pregnancies").select("*")
         if patient_id:
             query = query.eq("patient_id", to_int(patient_id))
-        if status:
+        if status and str(status).strip() and str(status).lower() != "all":
             query = query.eq("status", status)
         result = query.order("created_at", desc=True).execute()
-        pregnancies = result.data
+        pregnancies = result.data or []
         patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
         patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
         for p in pregnancies:

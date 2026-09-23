@@ -256,7 +256,11 @@ def hospital_patient_id(patient_id: Any) -> str:
 
 def enrich_patient_identifier(patient: dict) -> dict:
     patient = dict(patient)
-    patient["hospital_id"] = hospital_patient_id(patient.get("id"))
+    stored_hid = str(patient.get("hospital_id") or "").strip()
+    if stored_hid and stored_hid.upper().startswith("IH-USHD-"):
+        patient["hospital_id"] = stored_hid.upper()
+    else:
+        patient["hospital_id"] = hospital_patient_id(patient.get("id"))
     return patient
 
 def enrich_patient_identifiers(patients: list) -> list:

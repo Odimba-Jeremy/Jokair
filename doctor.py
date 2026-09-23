@@ -297,7 +297,9 @@ def register_doctor_routes(app, *, runtime):
             unit_price = to_float(data.get("unit_price") or data.get("price"), 0)
             pid = data.get("product_id")
             if unit_price <= 0 and pid:
-                stock_res = supabase.table("pharmacy_stock").select("selling_price, unit_price").eq("id", to_int(pid)).execute()
+                stock_res = supabase.table(TABLES.get("pharmacy", "pharmacy")).select("selling_price, unit_price").eq("id", to_int(pid)).execute()
+                if not stock_res.data:
+                    stock_res = supabase.table("pharmacy_stock").select("selling_price, unit_price").eq("id", to_int(pid)).execute()
                 if stock_res.data:
                     unit_price = to_float(stock_res.data[0].get("selling_price") or stock_res.data[0].get("unit_price"), 0)
             
@@ -306,7 +308,7 @@ def register_doctor_routes(app, *, runtime):
                 add_patient_account_line(
                     patient_id=patient_id,
                     category="medicament",
-                    description=f"Prescription: {medication} (x{quantity})",
+                    description=f"{medication} (x{quantity})",
                     amount=total_amount,
                     source="prescription",
                     source_id=created.get("id"),

@@ -498,6 +498,7 @@ def register_workflow_routes(app, *, runtime):
     @roles_required(*ROLES["staff"])
     def workflow_account_lines():
         if request.method == "GET":
+            accrue_daily_hospitalization_charges()
             patient_id = request.args.get("patient_id")
             query = supabase.table("patient_account_lines").select("*")
             if patient_id:
@@ -573,6 +574,7 @@ def register_workflow_routes(app, *, runtime):
     @roles_required("super_admin", "infirmier", "docteur", "reception")
     def workflow_hospitalizations():
         if request.method == "GET":
+            accrue_daily_hospitalization_charges()
             patient_id = request.args.get("patient_id")
             query = supabase.table("hospitalizations").select("*")
             if patient_id:
