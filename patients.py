@@ -299,13 +299,54 @@ def register_patient_routes(
         except Exception:
             pass
 
+        # 6. Maternité (grossesses, CPN, accouchements)
+        pregnancies = []
+        prenatal_visits = []
+        deliveries = []
+        try:
+            preg_res = supabase.table("pregnancies").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            pregnancies = preg_res.data or []
+        except Exception:
+            pass
+        try:
+            cpn_res = supabase.table("prenatal_consultations").select("*").eq("patient_id", patient_id).order("visit_date", desc=True).execute()
+            prenatal_visits = cpn_res.data or []
+        except Exception:
+            pass
+        try:
+            deliv_res = supabase.table("deliveries").select("*").eq("patient_id", patient_id).order("delivery_date", desc=True).execute()
+            deliveries = deliv_res.data or []
+        except Exception:
+            pass
+
+        # 7. Code QR dynamique
+        qr_code_url = None
+        try:
+            import qrcode
+            from io import BytesIO
+            qr_data = generate_qr_code_data(patient_id, patient_info.get("full_name", ""), patient_info.get("phone", ""))
+            qr = qrcode.QRCode(version=1, box_size=6, border=2)
+            qr.add_data(qr_data)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            qr_code_url = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+            patient_info["qr_code"] = qr_code_url
+        except Exception as qr_err:
+            print(f"QR Code non généré: {qr_err}")
+
         return jsonify({
             "patient": patient_info,
             "consultations": consultations,
             "prescriptions": prescriptions,
             "care_logs": care_logs,
             "lab_tests": lab_tests,
-            "hospitalisation": hospitalisation
+            "hospitalisation": hospitalisation,
+            "pregnancies": pregnancies,
+            "prenatal_visits": prenatal_visits,
+            "deliveries": deliveries,
+            "qr_code": qr_code_url
         })
 
     app.register_blueprint(patients)

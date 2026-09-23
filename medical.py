@@ -1,3 +1,7 @@
+try:
+    from events import broadcast_event
+except ImportError:
+    broadcast_event = lambda t, p=None: None
 """Routes de soins partagées entre médecin, infirmier et pharmacie."""
 
 from flask import Blueprint
@@ -135,7 +139,7 @@ def register_medical_routes(app, *, runtime):
 
                 updates["description"] = json.dumps(meta, ensure_ascii=False)
 
-        # Vérification du blocage pharmacie (Point 8) : si des produits sont requis et non encore livrés
+        # Vérification du blocage pharmacie côté backend : sécurité stricte
         if g.current_user.get("role") == "infirmier" and (data.get("admin_record") or data.get("current_occurrence")):
             care_row = supabase.table(TABLES["care"]).select("description, status").eq("id", care_id).execute()
             if care_row.data:
@@ -146,7 +150,9 @@ def register_medical_routes(app, *, runtime):
                     desc_obj = {}
                 has_products = bool(desc_obj.get("injectables") or desc_obj.get("consumables") or desc_obj.get("requires_pharmacy"))
                 pharm_status = desc_obj.get("pharmacy_status") or desc_obj.get("delivery_status") or care_row.data[0].get("status")
-                if has_products and pharm_status not in ("delivered", "dispensed", "completed"):
+                allowed_statuses = ("delivered", "dispensed", "completed", "scheduled", "in_progress", "active")
+                is_unblocked = (pharm_status in allowed_statuses) or (care_row.data[0].get("status") in allowed_statuses)
+                if has_products and not is_unblocked:
                     return jsonify({"error": "Soin bloqué : les produits pharmaceutiques doivent d'abord être livrés par la pharmacie."}), 422
 
         if not updates:
@@ -311,16 +317,44 @@ def register_medical_routes(app, *, runtime):
     @roles_required("super_admin", "pharmacie")
     def patch_care_prescription_compat(care_id: int):
         data = fast_json()
-        updates = {key: value for key, value in data.items() if key in ("status",) and value is not None}
-        if not updates:
+        status_val = data.get("status")
+        if not status_val:
             return jsonify({"error": "Statut requis"}), 422
-        updates["updated_at"] = now_iso()
-        result = supabase.table(TABLES["care"]).update(updates).eq("id", care_id).execute()
-        if not result.data:
+
+        care_row = supabase.table(TABLES["care"]).select("*").eq("id", care_id).execute()
+        if not care_row.data:
             return jsonify({"error": "Soin introuvable"}), 404
+        
+        row = care_row.data[0]
+        desc_str = row.get("description") or "{}"
+        try:
+            meta = json.loads(desc_str) if desc_str.strip().startswith("{") else {}
+        except Exception:
+            meta = {}
+            
+        meta["pharmacy_status"] = status_val
+        meta["delivery_status"] = status_val
+        if status_val == "delivered":
+            meta["delivered_at"] = now_iso()
+            meta["delivered_by"] = g.current_user.get("id")
+            meta["delivered_by_name"] = g.current_user.get("name")
+
+        updates = {
+            "status": status_val,
+            "description": json.dumps(meta, ensure_ascii=False),
+            "updated_at": now_iso()
+        }
+        result = supabase.table(TABLES["care"]).update(updates).eq("id", care_id).execute()
         add_audit("UPDATE", "care", f"Soin #{care_id} délivré par la pharmacie", care_id)
         invalidate_cache()
-        return jsonify(result.data[0])
+
+        # Émission de l'événement temps réel vers l'infirmier
+        try:
+            broadcast_event("care_delivered", {"care_id": care_id, "patient_id": row.get("patient_id")})
+        except Exception:
+            pass
+
+        return jsonify(result.data[0] if result.data else updates)
 
     @app.route("/api/care/pending", methods=["GET"])
     @roles_required(*ROLES["staff"])

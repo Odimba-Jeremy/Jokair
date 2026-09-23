@@ -45,6 +45,8 @@ def register_laboratory_routes(app, *, runtime):
         status = request.args.get("status")
         patient_id = request.args.get("patient_id")
         query = supabase.table(TABLES["lab_tests"]).select("*")
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("requested_by", g.current_user.get("id"))
         if status:
             query = query.eq("status", status)
         if patient_id:

@@ -443,11 +443,14 @@ def register_workflow_routes(app, *, runtime):
 
         payload = {
             "patient_id": patient_id,
+            "motif": data.get("motif", ""),
             "symptoms": data.get("symptoms", ""),
             "diagnosis": data.get("diagnosis", ""),
             "diagnostics": data.get("diagnostics", []),
             "observations": data.get("observations", ""),
-            "treatment_plan": data.get("treatment_plan", ""),
+            "physical_exam": data.get("physical_exam", ""),
+            "care_plan": data.get("care_plan", "") or data.get("treatment_plan", ""),
+            "treatment_plan": data.get("treatment_plan", "") or data.get("care_plan", ""),
             "recommendations": data.get("recommendations", ""),
             "notes": full_notes,
             "medical_history": data.get("medical_history", ""),
@@ -625,6 +628,40 @@ def register_workflow_routes(app, *, runtime):
         add_audit("CREATE", "hospitalization", f"Demande d’hospitalisation patient #{patient_id}", patient_id)
         invalidate_cache()
         return jsonify(result.data[0]), 201
+
+    def accrue_daily_hospitalization_charges():
+        """Cote automatiquement chaque jour passé en hospitalisation dans le compte patient."""
+        try:
+            active_hosps = supabase.table("hospitalizations").select("*").in_("status", ["admitted", "hospitalized", "active"]).execute().data or []
+            today = datetime.now(timezone.utc).date()
+            for hosp in active_hosps:
+                hosp_id = hosp.get("id")
+                patient_id = hosp.get("patient_id")
+                daily_rate = to_float(hosp.get("daily_rate"), 0)
+                if not hosp_id or not patient_id or daily_rate <= 0:
+                    continue
+                adm_date_str = hosp.get("admission_date") or hosp.get("created_at")
+                adm_date = parse_date(adm_date_str) or today
+                days_total = max(1, (today - adm_date).days + 1)
+                
+                # Vérifier combien de jours ont déjà été cotés pour cette hospitalisation
+                existing_lines = supabase.table("patient_account_lines").select("id").eq("patient_id", patient_id).eq("source", "hospitalization_daily").eq("source_id", hosp_id).execute().data or []
+                billed_days = len(existing_lines)
+                
+                # Coter les jours restants
+                for day_num in range(billed_days + 1, days_total + 1):
+                    add_patient_account_line(
+                        patient_id=patient_id,
+                        category="hospitalisation",
+                        description=f"Hospitalisation: Séjour Jour {day_num} (Chambre {hosp.get('room') or 'standard'})",
+                        amount=daily_rate,
+                        source="hospitalization_daily",
+                        source_id=hosp_id,
+                        quantity=1,
+                        unit_price=daily_rate
+                    )
+        except Exception as exc:
+            print(f"Erreur cotation quotidienne hospitalisation: {exc}")
 
     @workflow.route("/api/workflow/hospitalizations/<int:hosp_id>/discharge", methods=["POST"])
     @roles_required("super_admin", "infirmier", "docteur")

@@ -252,7 +252,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def hospital_patient_id(patient_id: Any) -> str:
-    return f"HB-USHD-{to_int(patient_id):06d}"
+    return f"IH-USHD-{to_int(patient_id):05d}"
 
 def enrich_patient_identifier(patient: dict) -> dict:
     patient = dict(patient)

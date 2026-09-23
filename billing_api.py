@@ -12,8 +12,9 @@ def register_billing_routes(app, *, runtime):
         return workflow_tariffs.__wrapped__()
 
     @billing.route("/api/exchange-rate", methods=["GET"])
-    @roles_required("super_admin", "reception")
-    @cached(timeout=300)
+    @billing.route("/api/billing/exchange-rate", methods=["GET"])
+    @roles_required(*ROLES["staff"])
+    @cached(timeout=60)
     def get_exchange_rate():
         try:
             result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(1).execute()

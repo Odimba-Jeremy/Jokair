@@ -211,9 +211,12 @@ def register_doctor_routes(app, *, runtime):
     # ==================== PRESCRIPTIONS ====================
     @app.route("/api/prescriptions", methods=["GET"])
     @roles_required(*ROLES["staff"])
-    @cached(120)
+    @cached(60)
     def get_prescriptions():
-        result = supabase.table(TABLES["prescriptions"]).select("*").order("created_at", desc=True).execute()
+        query = supabase.table(TABLES["prescriptions"]).select("*")
+        if g.current_user.get("role") == "docteur":
+            query = query.eq("doctor_id", g.current_user.get("id"))
+        result = query.order("created_at", desc=True).execute()
         prescriptions = result.data
         patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
         patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
@@ -288,6 +291,31 @@ def register_doctor_routes(app, *, runtime):
         }
         result = compatible_insert(TABLES["prescriptions"], prescription)
         created = result.data[0] if result.data else prescription
+
+        # Cotation automatique : envoi immédiat du prix dans le compte patient
+        try:
+            unit_price = to_float(data.get("unit_price") or data.get("price"), 0)
+            pid = data.get("product_id")
+            if unit_price <= 0 and pid:
+                stock_res = supabase.table("pharmacy_stock").select("selling_price, unit_price").eq("id", to_int(pid)).execute()
+                if stock_res.data:
+                    unit_price = to_float(stock_res.data[0].get("selling_price") or stock_res.data[0].get("unit_price"), 0)
+            
+            if unit_price > 0:
+                total_amount = round(quantity * unit_price, 2)
+                add_patient_account_line(
+                    patient_id=patient_id,
+                    category="medicament",
+                    description=f"Prescription: {medication} (x{quantity})",
+                    amount=total_amount,
+                    source="prescription",
+                    source_id=created.get("id"),
+                    quantity=quantity,
+                    unit_price=unit_price
+                )
+        except Exception as bill_err:
+            print(f"Erreur cotation compte patient pour prescription: {bill_err}")
+
         add_audit("CREATE", "prescription", f"Prescription #{created.get('id', '')}", created.get("id"))
         invalidate_cache()
         return jsonify(created), 201
