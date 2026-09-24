@@ -15,7 +15,7 @@ import base64
 import hashlib
 import uuid
 
-from flask import Flask, jsonify, request, g, send_file, Response
+from flask import Flask, jsonify, request, g, send_file, Response, has_request_context
 from flask_cors import CORS
 from flask_caching import Cache
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -628,8 +628,8 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
         "source": source,
         "source_id": source_id,
         "status": "pending",
-        "created_by": g.current_user.get("id") if hasattr(g, "current_user") else None,
-        "created_by_name": g.current_user.get("name") if hasattr(g, "current_user") else "Systeme",
+        "created_by": g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None,
+        "created_by_name": g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme",
         "created_at": now_iso(),
         "updated_at": now_iso()
     }
@@ -642,10 +642,12 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
                 new_bal = round(to_float(acc.data[0].get("balance", 0)) + amount, 2)
                 supabase.table("patient_accounts").update({"balance": new_bal, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
             else:
+                creator_id = g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None
+                creator_name = g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme"
                 compatible_insert("patient_accounts", {
                     "patient_id": patient_id, "balance": amount, "status": "active",
-                    "created_by": g.current_user.get("id") if hasattr(g, "current_user") else None,
-                    "created_by_name": g.current_user.get("name") if hasattr(g, "current_user") else "Systeme",
+                    "created_by": creator_id,
+                    "created_by_name": creator_name,
                     "created_at": now_iso(), "updated_at": now_iso()
                 })
         except Exception as bal_exc:

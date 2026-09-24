@@ -514,8 +514,8 @@ def register_billing_routes(app, *, runtime):
         account = account_result.data[0] if account_result.data else {"patient_id": patient_id, "balance": 0, "status": "inactive"}
         account["patient"] = patient_result.data[0] if patient_result.data else None
 
-        pending_lines = [l for l in lines if str(l.get("status") or "").lower() != "paid"]
-        paid_lines    = [l for l in lines if str(l.get("status") or "").lower() == "paid"]
+        pending_lines = [l for l in lines if str(l.get("status") or "").lower() == "pending"]
+        paid_lines    = [l for l in lines if str(l.get("status") or "").lower() == "invoiced"]
         total_pending = round(sum(to_float(l.get("amount"), 0) for l in pending_lines), 2)
         total_paid    = round(sum(to_float(l.get("amount"), 0) for l in paid_lines), 2)
         total_all     = round(sum(to_float(l.get("amount"), 0) for l in lines), 2)
@@ -524,8 +524,8 @@ def register_billing_routes(app, *, runtime):
         normalized_lines = []
         for l in lines:
             line_copy = dict(l)
-            st = str(line_copy.get("status") or "pending").upper()
-            line_copy["status"] = st
+            db_status = str(line_copy.get("status") or "pending").lower()
+            line_copy["status"] = "PAID" if db_status == "invoiced" else "PENDING"
             cat = str(line_copy.get("category") or line_copy.get("source") or "Général").capitalize()
             line_copy["service"] = cat
             normalized_lines.append(line_copy)
@@ -635,18 +635,18 @@ def register_billing_routes(app, *, runtime):
         # 🔄 Marquer les factures impayées comme réglées
         unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
         for inv in unpaid_invoices:
-            supabase.table(TABLES["billing"]).update({
+            compatible_update(TABLES["billing"], {
                 "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
-                "balance_due": 0, "payment_method": method,
+                "payment_method": method,
                 "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
                 "updated_at": now_iso()
-            }).eq("id", inv["id"]).execute()
+            }, "id", inv["id"])
             add_audit("UPDATE", "billing", f"Facture #{inv['id']} soldée via compte patient", inv["id"])
 
-        # ✅ Marquer toutes les lignes pending comme payées
+        # ✅ Marquer toutes les lignes pending comme payées (statut PostgreSQL 'invoiced')
         supabase.table("patient_account_lines").update({
-            "status": "paid", "paid_at": now_iso(),
-            "paid_by": g.current_user["name"], "updated_at": now_iso()
+            "status": "invoiced",
+            "updated_at": now_iso()
         }).eq("patient_id", patient_id).eq("status", "pending").execute()
 
         # 🔄 Remettre le solde à 0 (ou solde restant si paiement partiel)

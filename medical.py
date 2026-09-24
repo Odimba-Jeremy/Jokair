@@ -339,6 +339,70 @@ def register_medical_routes(app, *, runtime):
             meta["delivered_by"] = g.current_user.get("id")
             meta["delivered_by_name"] = g.current_user.get("name")
 
+            # Facturation automatique des produits de soin délivrés
+            if not meta.get("delivered_and_billed"):
+                meta["delivered_and_billed"] = True
+                pat_id = to_int(row.get("patient_id"))
+                if pat_id:
+                    items_to_bill = []
+                    # 1. Injectables
+                    for inj in (meta.get("injectables") or []):
+                        items_to_bill.append({
+                            "product_id": inj.get("product_id"),
+                            "product_name": inj.get("product_name") or inj.get("name") or "Injectable",
+                            "quantity": max(1, to_int(inj.get("quantity"), 1)),
+                            "unit_price": to_float(inj.get("unit_price") or inj.get("selling_price") or 0)
+                        })
+                    # 2. Consommables
+                    for cons in (meta.get("consumables") or []):
+                        items_to_bill.append({
+                            "product_id": cons.get("product_id"),
+                            "product_name": cons.get("product_name") or cons.get("name") or "Consommable",
+                            "quantity": max(1, to_int(cons.get("quantity"), 1)),
+                            "unit_price": to_float(cons.get("unit_price") or cons.get("selling_price") or 0)
+                        })
+                    # 3. Soin unitaire
+                    if not items_to_bill and not meta.get("is_session"):
+                        p_id = meta.get("product_id") or row.get("product_id")
+                        p_name = meta.get("product_name") or row.get("medication") or row.get("care_type") or "Produit de soin"
+                        items_to_bill.append({
+                            "product_id": p_id,
+                            "product_name": p_name,
+                            "quantity": max(1, to_int(meta.get("quantity") or row.get("quantity"), 1)),
+                            "unit_price": to_float(meta.get("unit_price") or row.get("price") or 0)
+                        })
+
+                    # Récupérer les prix depuis le stock pharmacie pour tout produit sans prix unitaire
+                    needed_ids = [to_int(it["product_id"]) for it in items_to_bill if it.get("product_id")]
+                    stock_prices = {}
+                    if needed_ids:
+                        try:
+                            p_res = supabase.table(TABLES["pharmacy"]).select("id,medication_name,selling_price").in_("id", needed_ids).execute()
+                            for p in (p_res.data or []):
+                                stock_prices[to_int(p["id"])] = to_float(p.get("selling_price"), 0)
+                        except Exception as pe:
+                            print(f"Erreur lookup stock prix: {pe}")
+
+                    for item in items_to_bill:
+                        p_id = to_int(item.get("product_id"))
+                        u_price = item.get("unit_price", 0)
+                        if (not u_price or u_price <= 0) and p_id and p_id in stock_prices:
+                            u_price = stock_prices[p_id]
+                        
+                        qty = max(1, item.get("quantity", 1))
+                        line_amount = round(u_price * qty, 2)
+                        if line_amount > 0 and "add_patient_account_line" in globals():
+                            add_patient_account_line(
+                                patient_id=pat_id,
+                                category="pharmacie",
+                                description=f"Produit soin: {item.get('product_name')}",
+                                amount=line_amount,
+                                source="care_delivery",
+                                source_id=care_id,
+                                quantity=qty,
+                                unit_price=u_price
+                            )
+
         updates = {
             "status": status_val,
             "description": json.dumps(meta, ensure_ascii=False),

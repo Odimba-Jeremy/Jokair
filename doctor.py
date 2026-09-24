@@ -355,6 +355,29 @@ def register_doctor_routes(app, *, runtime):
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
+
+        presc_row = supabase.table(TABLES["prescriptions"]).select("*").eq("id", prescription_id).execute()
+        if not presc_row.data:
+            return jsonify({"error": "Prescription introuvable"}), 404
+        row = presc_row.data[0]
+
+        # Facturation automatique si servie/délivrée et pas encore facturée
+        is_delivered = updates.get("status") in ("served", "dispensed", "completed") or updates.get("pharmacy_status") == "dispensed"
+        if is_delivered and not row.get("invoiced") and not updates.get("invoiced"):
+            pat_id = to_int(row.get("patient_id"))
+            amount = to_float(data.get("amount") or data.get("price") or 0)
+            med_name = (row.get("medication") or row.get("product_name") or "").strip()
+            if (not amount or amount <= 0) and med_name:
+                try:
+                    p_match = supabase.table(TABLES["pharmacy"]).select("id,selling_price").ilike("medication_name", f"%{med_name}%").limit(1).execute()
+                    if p_match.data:
+                        amount = to_float(p_match.data[0].get("selling_price", 0))
+                except Exception:
+                    pass
+            if pat_id and amount > 0 and "add_patient_account_line" in globals():
+                add_patient_account_line(pat_id, "pharmacie", f"Médicament: {med_name}", amount, "prescription", prescription_id, quantity=1, unit_price=amount)
+            updates["invoiced"] = True
+
         updates["updated_at"] = now_iso()
         result = supabase.table(TABLES["prescriptions"]).update(updates).eq("id", prescription_id).execute()
         if not result.data:
