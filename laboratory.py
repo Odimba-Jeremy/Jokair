@@ -65,6 +65,16 @@ def register_laboratory_routes(app, *, runtime):
         data = fast_json()
         if not data.get("patient_id") or not data.get("test_type"):
             return jsonify({"error": "Patient et type d'analyse requis"}), 422
+
+        patient_id = to_int(data.get("patient_id"))
+        test_type = str(data.get("test_type") or "").strip()
+
+        # Verrou Anti-Doublon Analyse : vérifier si l'examen n'a pas déjà été demandé dans les 24h
+        yesterday = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        existing_test = supabase.table(TABLES["lab_tests"]).select("id,status,created_at").eq("patient_id", patient_id).eq("test_type", test_type).gte("created_at", yesterday).in_("status", ["pending", "in_progress", "preleve", "completed"]).execute().data or []
+        if existing_test:
+            return jsonify({"error": f"L'analyse '{test_type}' a déjà été prescrite pour ce patient au cours des dernières 24h (#{existing_test[0]['id']})"}), 409
+
         test = {
             "patient_id": to_int(data.get("patient_id")),
             "test_type": data.get("test_type"),
@@ -134,6 +144,10 @@ def register_laboratory_routes(app, *, runtime):
     @roles_required("super_admin", "laboratoire")
     def save_test_result(test_id: int):
         data = fast_json()
+        # Verrou Lecture Seule : interdire la modification d'un résultat déjà validé sauf super_admin
+        existing = supabase.table(TABLES["lab_tests"]).select("status,result").eq("id", test_id).execute().data or []
+        if existing and existing[0].get("status") == "completed" and g.current_user.get("role") != "super_admin":
+            return jsonify({"error": "Ce résultat d'analyse a déjà été validé et est verrouillé en lecture seule"}), 403
         updates = {
             "result": data.get("result", ""),
             "observations": data.get("observations", ""),

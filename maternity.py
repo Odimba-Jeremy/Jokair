@@ -76,6 +76,12 @@ def register_maternity_routes(app, *, runtime):
         data = fast_json()
         if not data.get("patient_id") or not data.get("last_menstrual_period"):
             return jsonify({"error": "Patient et DDR requis"}), 422
+        patient_id = to_int(data.get("patient_id"))
+        # Verrou Anti-Doublon : une patiente ne peut avoir qu'une seule grossesse active
+        existing_active = supabase.table("pregnancies").select("id,created_at").eq("patient_id", patient_id).eq("status", "active").execute().data or []
+        if existing_active:
+            return jsonify({"error": f"Cette patiente a déjà un dossier de grossesse active (#{existing_active[0]['id']}). Veuillez clôturer le suivi précédent avant d'en créer un nouveau."}), 409
+
         timeline = pregnancy_timeline(data.get("last_menstrual_period"))
         if not timeline:
             return jsonify({"error": "DDR invalide ou située dans le futur"}), 422
@@ -299,6 +305,9 @@ def register_maternity_routes(app, *, runtime):
         delivery_type = data.get("delivery_type", "vaginal")
         
         if pregnancy_id:
+            existing_del = supabase.table("deliveries").select("id").eq("pregnancy_id", to_int(pregnancy_id)).execute().data or []
+            if existing_del:
+                return jsonify({"error": "L'accouchement a déjà été enregistré pour cette grossesse (#" + str(existing_del[0]['id']) + ")"}), 409
             supabase.table("pregnancies").update({"status": "completed", "updated_at": now_iso()}).eq("id", pregnancy_id).execute()
         
         delivery = {

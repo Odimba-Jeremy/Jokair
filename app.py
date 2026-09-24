@@ -635,6 +635,21 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
     }
     try:
         result = compatible_insert("patient_account_lines", line)
+        # 🔄 Mise à jour automatique du solde dans patient_accounts
+        try:
+            acc = supabase.table("patient_accounts").select("id,balance").eq("patient_id", patient_id).execute()
+            if acc.data:
+                new_bal = round(to_float(acc.data[0].get("balance", 0)) + amount, 2)
+                supabase.table("patient_accounts").update({"balance": new_bal, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
+            else:
+                compatible_insert("patient_accounts", {
+                    "patient_id": patient_id, "balance": amount, "status": "active",
+                    "created_by": g.current_user.get("id") if hasattr(g, "current_user") else None,
+                    "created_by_name": g.current_user.get("name") if hasattr(g, "current_user") else "Systeme",
+                    "created_at": now_iso(), "updated_at": now_iso()
+                })
+        except Exception as bal_exc:
+            print(f"Erreur mise à jour solde compte #{patient_id}: {bal_exc}")
         return result.data[0] if result.data else None
     except Exception as exc:
         print(f"Impossible d'ajouter la ligne compte patient: {exc}")

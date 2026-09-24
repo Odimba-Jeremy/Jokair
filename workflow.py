@@ -105,6 +105,12 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+
+        # Verrou Anti-Double Consultation : vérifier si le patient est déjà en consultation avec un autre médecin
+        active_q = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).eq("status", "in_consultation").execute().data or []
+        if active_q and str(active_q[0].get("assigned_doctor_id") or "").strip() != str(g.current_user.get("id") or "").strip():
+            doc_name = active_q[0].get("assigned_doctor_name") or "un autre médecin"
+            return jsonify({"error": f"Ce patient est actuellement déjà en consultation avec Dr. {doc_name}"}), 409
         patient = supabase.table(TABLES["patients"]).select("id,full_name").eq("id", patient_id).execute().data or []
         if not patient:
             return jsonify({"error": "Patient introuvable"}), 404
@@ -115,11 +121,12 @@ def register_workflow_routes(app, *, runtime):
         if same_uid:
             return jsonify({"message": "Action déjà enregistrée", "created": False, "patient": enrich_queue_rows(same_uid)[0]}), 200
 
-        # Idempotence : un patient ne peut avoir qu'une entrée active par défaut.
+        # Idempotence & Verrou Anti-Doublon : un patient ne peut avoir qu'une entrée active dans la file
         existing = supabase.table("patient_queue").select("*").eq("patient_id", patient_id).in_("status", ACTIVE_QUEUE_STATUSES).order("updated_at", desc=True).limit(1).execute().data or []
         if existing:
             row = enrich_queue_rows(existing)[0]
-            return jsonify({"message": "Patient déjà présent dans la file", "created": False, "patient": row}), 200
+            st_label = {"waiting": "En attente", "with_nurse": "Prise de constantes", "vitals_done": "Constantes prises", "assigned": "Assigné", "in_consultation": "En consultation"}.get(row.get("status"), row.get("status"))
+            return jsonify({"error": f"Ce patient est déjà présent dans la file d'attente (Statut: {st_label})", "created": False, "patient": row}), 409
 
         last = supabase.table("patient_queue").select("arrival_order").order("arrival_order", desc=True).limit(1).execute().data or []
         arrival_order = to_int(last[0].get("arrival_order"), 0) + 1 if last else 1
@@ -209,7 +216,31 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+        # 🛡️ Protection : empêcher la double saisie de signes vitaux pour le même passage
+        active_queue = supabase.table("patient_queue").select("id,status").eq("patient_id", patient_id).eq("status", "vitals_done").execute().data or []
+        if active_queue:
+            return jsonify({
+                "error": "Les signes vitaux ont déjà été enregistrés pour ce passage. Un seul enregistrement est autorisé par passage.",
+                "queue_id": active_queue[0].get("id")
+            }), 409
         
+        # Garde-fous physiologiques (détection d'erreurs de frappe aberrantes)
+        temp_val = to_float(data.get("temperature"), 0)
+        if temp_val > 0 and (temp_val < 30.0 or temp_val > 45.0):
+            return jsonify({"error": f"Température aberrante ({temp_val}°C). La valeur doit être comprise entre 30.0°C et 45.0°C"}), 422
+        
+        hr_val = to_int(data.get("heart_rate"), 0)
+        if hr_val > 0 and (hr_val < 20 or hr_val > 300):
+            return jsonify({"error": f"Fréquence cardiaque aberrante ({hr_val} bpm). La valeur doit être comprise entre 20 et 300 bpm"}), 422
+
+        rr_val = to_int(data.get("respiratory_rate") or data.get("frequence_respiratoire"), 0)
+        if rr_val > 0 and (rr_val < 4 or rr_val > 90):
+            return jsonify({"error": f"Fréquence respiratoire aberrante ({rr_val}/min). La valeur doit être comprise entre 4 et 90/min"}), 422
+
+        spo2_val = to_int(data.get("oxygen_saturation"), 0)
+        if spo2_val > 0 and (spo2_val < 30 or spo2_val > 100):
+            return jsonify({"error": f"Saturation en oxygène aberrante ({spo2_val}%). La valeur doit être comprise entre 30% et 100%"}), 422
+
         is_pregnant = data.get("is_pregnant", False)
         
         payload = {
@@ -224,6 +255,7 @@ def register_workflow_routes(app, *, runtime):
             "weight": data.get("weight"),
             "height": data.get("height"),
             "heart_rate": data.get("heart_rate"),
+            "respiratory_rate": to_int(data.get("respiratory_rate") or data.get("frequence_respiratoire"), None),
             "oxygen_saturation": data.get("oxygen_saturation"),
             "notes": data.get("notes", ""),
             "author": data.get("author", g.current_user.get("name") or g.current_user.get("email")),
@@ -590,6 +622,14 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+
+        # Verrou Anti-Double Hospitalisation : impossible d'ouvrir 2 séjours actifs en parallèle
+        existing_hosp = supabase.table("hospitalizations").select("id,room,bed,status").eq("patient_id", patient_id).in_("status", ["pending", "admitted", "hospitalized", "active"]).execute().data or []
+        if existing_hosp:
+            h = existing_hosp[0]
+            st_text = "En attente d'admission" if h.get("status") == "pending" else "Admis en chambre"
+            return jsonify({"error": f"Ce patient a déjà une hospitalisation en cours ({st_text}, Chambre: {h.get('room') or 'N/A'})"}), 409
+
         role = g.current_user.get("role")
         patient_row = supabase.table(TABLES["patients"]).select("id,assigned_doctor_id").eq("id", patient_id).execute().data or []
         if not patient_row:
@@ -720,6 +760,11 @@ def register_workflow_routes(app, *, runtime):
             requested_bed = str(data.get("bed_id") or data.get("bed"))
             if to_int(requested_bed) < 1 or to_int(requested_bed) > to_int(room.get("total_beds"), 1):
                 return jsonify({"error": "Lit invalide pour cette chambre"}), 422
+
+            # Verrou Overbooking Lit : vérifier si le lit n'est pas déjà occupé par un autre patient
+            occupied = supabase.table("hospitalizations").select("id,patient_id,patient_name").eq("room_id", room_id).eq("bed", str(requested_bed)).in_("status", ["admitted", "hospitalized", "active"]).neq("id", hosp_id).execute().data or []
+            if occupied:
+                return jsonify({"error": f"Le Lit {requested_bed} de la Chambre {room.get('name') or room_id} est déjà occupé par un autre patient (Hospitalisation #{occupied[0]['id']})"}), 409
             if requested_bed in room.get("occupied_bed_ids", []):
                 return jsonify({"error": "Ce lit est déjà occupé"}), 422
             if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):

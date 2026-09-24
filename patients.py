@@ -154,6 +154,15 @@ def register_patient_routes(
         if not can_access_patient_record(add_pregnancy_flags(existing.data)[0]):
             return jsonify({"error": "Acces patient non autorise"}), 403
         allowed_fields = ["full_name", "phone", "email", "date_of_birth", "gender", "blood_type", "address", "status", "allergies", "medical_history", "emergency_contact", "insurance", "priority", "doctor_notes", "room_number", "is_pregnant"]
+        # 🛡️ Protection : champs immuables — seul super_admin peut modifier le sexe et la date de naissance
+        immutable_fields = {"gender", "date_of_birth"}
+        if g.current_user.get("role") != "super_admin":
+            for field in immutable_fields:
+                if field in data and str(data[field]) != str(existing.data[0].get(field, "")):
+                    return jsonify({
+                        "error": f"Le champ '{field}' ne peut pas être modifié après création du dossier. Contactez un administrateur.",
+                        "field": field
+                    }), 403
         updates = {key: value for key, value in data.items() if key in allowed_fields and value is not None}
         if "status" in updates and updates["status"] not in allowed_statuses:
             return jsonify({"error": f"Statut invalide: {updates['status']}. Valeurs autorisées: {', '.join(allowed_statuses)}"}), 422
@@ -161,7 +170,8 @@ def register_patient_routes(
         result = supabase.table(tables["patients"]).update(updates).eq("id", patient_id).execute()
         if not result.data:
             return jsonify({"error": "Patient introuvable"}), 404
-        add_audit("UPDATE", "patient", f"Patient #{patient_id} modifié", patient_id)
+        changed_fields = ", ".join(k for k in updates.keys() if k != "updated_at")
+        add_audit("UPDATE", "patient", f"Patient #{patient_id} modifié — champs: {changed_fields}", patient_id)
         invalidate_cache()
         return jsonify(result.data[0])
 
@@ -324,6 +334,14 @@ def register_patient_routes(
         except Exception:
             pass
 
+        # 6b. Signes vitaux
+        vitals = []
+        try:
+            vit_res = supabase.table("vital_signs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+            vitals = vit_res.data or []
+        except Exception:
+            pass
+
         # 7. Code QR dynamique
         qr_code_url = None
         try:
@@ -351,6 +369,7 @@ def register_patient_routes(
             "pregnancies": pregnancies,
             "prenatal_visits": prenatal_visits,
             "deliveries": deliveries,
+            "vitals": vitals,
             "qr_code": qr_code_url
         })
 

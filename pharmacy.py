@@ -173,20 +173,34 @@ def register_pharmacy_routes(app, *, runtime):
         if not item_result.data:
             return jsonify({"error": "Médicament introuvable"}), 404
         item = item_result.data[0]
+        # 🛡️ Protection : vérifier la date de péremption
+        expiry_date = item.get("expiry_date")
+        if expiry_date:
+            today = datetime.now(timezone.utc).date().isoformat()
+            if str(expiry_date) < today:
+                return jsonify({
+                    "error": f"Le médicament '{item.get('medication_name')}' est périmé depuis le {expiry_date}. Dispensation impossible.",
+                    "expiry_date": expiry_date
+                }), 409
+        # 🛡️ Protection : vérifier le stock disponible
         if item.get("quantity", 0) < quantity:
             return jsonify({"error": f"Stock insuffisant. Disponible: {item.get('quantity')}"}), 422
         unit_price = to_float(data.get("unit_price"), item.get("selling_price", 0))
         total_amount = round(quantity * unit_price, 2)
-        invoice_data = {
-            "patient_id": to_int(data.get("patient_id")),
-            "description": data.get("description", f"Délivrance: {item.get('medication_name')} x{quantity}"),
-            "items": [{"medication_id": item_id, "description": item.get("medication_name"), "quantity": quantity, "unit_price": unit_price, "amount": total_amount}],
-            "source": "pharmacy_dispense"
-        }
+        patient_id = to_int(data.get("patient_id"))
         try:
-            with app.test_request_context(json=invoice_data):
-                g.current_user = g.current_user or {"id": 1, "name": "Pharmacie"}
-                response = create_grouped_invoice()
+            # ✅ Ajout direct au compte patient unique (Mode C)
+            add_patient_account_line(
+                patient_id,
+                "pharmacie",
+                f"Médicament: {item.get('medication_name')} x{quantity}",
+                total_amount,
+                "pharmacy_dispense",
+                item_id,
+                quantity,
+                unit_price
+            )
+
             new_qty = item.get("quantity", 0) - quantity
             supabase.table(TABLES["pharmacy"]).update({"quantity": new_qty, "updated_at": now_iso()}).eq("id", item_id).execute()
 
@@ -195,8 +209,8 @@ def register_pharmacy_routes(app, *, runtime):
                 "medication_name": item.get("medication_name"),
                 "type": "sortie",
                 "quantity": quantity,
-                "reason": f"Dispensation - Patient #{data.get('patient_id')}",
-                "patient_id": data.get("patient_id"),
+                "reason": f"Dispensation - Patient #{patient_id}",
+                "patient_id": patient_id,
                 "created_by": g.current_user["id"],
                 "created_by_name": g.current_user["name"],
                 "created_at": now_iso()
@@ -204,7 +218,7 @@ def register_pharmacy_routes(app, *, runtime):
 
             add_audit("UPDATE", "pharmacy", f"Dispensation: {item.get('medication_name')} x{quantity}", item_id)
             invalidate_cache()
-            return jsonify({"message": "Médicament délivré avec succès", "invoice": response.get_json() if hasattr(response, 'get_json') else None}), 201
+            return jsonify({"message": "Médicament délivré et imputé sur le compte patient avec succès", "amount": total_amount}), 201
         except Exception as exc:
             return jsonify({"error": f"Erreur lors de la dispensation: {str(exc)}"}), 500
 

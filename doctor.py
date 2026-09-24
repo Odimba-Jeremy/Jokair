@@ -91,6 +91,9 @@ def register_doctor_routes(app, *, runtime):
         starts_at = parse_appointment_time(data.get("date"))
         if not starts_at:
             return jsonify({"error": "Date et heure de rendez-vous invalides"}), 422
+        # 🛡️ Protection : interdire les rendez-vous dans le passé
+        if starts_at < datetime.now(timezone.utc):
+            return jsonify({"error": "Impossible de créer un rendez-vous dans le passé. Veuillez choisir une date future."}), 422
         duration = min(max(to_int(data.get("duration"), 30), 5), 480)
         assigned_doctor_id = g.current_user["id"] if g.current_user.get("role") == "docteur" else (data.get("doctor_id") or g.current_user["id"])
         uid = appointment_uid(data)

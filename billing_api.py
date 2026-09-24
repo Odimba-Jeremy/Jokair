@@ -364,6 +364,16 @@ def register_billing_routes(app, *, runtime):
     @billing.route("/api/billing/<int:invoice_id>", methods=["DELETE"])
     @roles_required("super_admin")
     def delete_invoice(invoice_id: int):
+        # 🛡️ Protection : interdire la suppression d'une facture déjà payée
+        existing = supabase.table(TABLES["billing"]).select("id,status,invoice_number").eq("id", invoice_id).execute()
+        if not existing.data:
+            return jsonify({"error": "Facture introuvable"}), 404
+        inv = existing.data[0]
+        if inv.get("status") == "paid":
+            return jsonify({
+                "error": f"Impossible de supprimer la facture #{inv.get('invoice_number', invoice_id)} : elle a déjà été réglée.",
+                "status": "paid"
+            }), 403
         supabase.table(TABLES["billing"]).delete().eq("id", invoice_id).execute()
         add_audit("DELETE", "billing", f"Facture #{invoice_id} supprimée", invoice_id)
         invalidate_cache()
@@ -496,29 +506,46 @@ def register_billing_routes(app, *, runtime):
     @billing.route("/api/billing/accounts/<int:patient_id>/full", methods=["GET"])
     @roles_required("super_admin", "reception")
     def get_full_billing_account(patient_id: int):
+        # Lecture directe depuis patient_account_lines (source de vérité pour tous les actes)
         account_result = supabase.table("patient_accounts").select("*").eq("patient_id", patient_id).execute()
-        invoices = supabase.table(TABLES["billing"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-        lines = []
-        for invoice in invoices:
-            raw_items = invoice.get("line_items") or invoice.get("items") or []
-            if isinstance(raw_items, str):
-                try:
-                    raw_items = json.loads(raw_items)
-                except (TypeError, ValueError):
-                    raw_items = []
-            if isinstance(raw_items, list):
-                for item in raw_items:
-                    if isinstance(item, dict):
-                        lines.append({**item, "invoice_id": invoice.get("id")})
-            elif invoice.get("amount"):
-                lines.append({"invoice_id": invoice.get("id"), "description": invoice.get("description", "Prestation"), "amount": invoice.get("amount")})
+        lines = supabase.table("patient_account_lines").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
         transactions = supabase.table("patient_account_transactions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
-        patient_result = supabase.table(TABLES["patients"]).select("id,full_name").eq("id", patient_id).execute()
+        patient_result = supabase.table(TABLES["patients"]).select("id,full_name,phone,hospital_id").eq("id", patient_id).execute()
         account = account_result.data[0] if account_result.data else {"patient_id": patient_id, "balance": 0, "status": "inactive"}
         account["patient"] = patient_result.data[0] if patient_result.data else None
-        account["lines"] = lines
-        account["payments"] = transactions
-        account["total"] = sum(to_float(line.get("amount", line.get("total", 0)), 0) for line in lines)
+
+        pending_lines = [l for l in lines if str(l.get("status") or "").lower() != "paid"]
+        paid_lines    = [l for l in lines if str(l.get("status") or "").lower() == "paid"]
+        total_pending = round(sum(to_float(l.get("amount"), 0) for l in pending_lines), 2)
+        total_paid    = round(sum(to_float(l.get("amount"), 0) for l in paid_lines), 2)
+        total_all     = round(sum(to_float(l.get("amount"), 0) for l in lines), 2)
+
+        # Normalisation pour l'affichage de l'interface (badges de statut et libellé de service)
+        normalized_lines = []
+        for l in lines:
+            line_copy = dict(l)
+            st = str(line_copy.get("status") or "pending").upper()
+            line_copy["status"] = st
+            cat = str(line_copy.get("category") or line_copy.get("source") or "Général").capitalize()
+            line_copy["service"] = cat
+            normalized_lines.append(line_copy)
+
+        # Normalisation des montants de transactions (valeur absolue positive pour l'affichage)
+        normalized_payments = []
+        for tx in transactions:
+            tx_copy = dict(tx)
+            raw_amt = to_float(tx_copy.get("amount"), 0)
+            tx_copy["amount"] = abs(raw_amt)
+            normalized_payments.append(tx_copy)
+
+        account["status"] = "OPEN" if total_pending > 0 else ("PAID" if lines else "SOLDE")
+        account["lines"] = normalized_lines
+        account["payments"] = normalized_payments
+        account["total"] = total_pending  # Montant restant à régler par le patient
+        account["total_pending"] = total_pending
+        account["total_paid"] = total_paid
+        account["total_all"] = total_all
+        account["balance"] = total_pending
         return jsonify(account)
 
     @billing.route("/api/billing/accounts/update", methods=["POST"])
@@ -595,57 +622,59 @@ def register_billing_routes(app, *, runtime):
         data = fast_json()
         amount = to_float(data.get("amount"), 0)
         method = data.get("method") or data.get("payment_mode") or "cash"
-        
+
         account_res = supabase.table("patient_accounts").select("*").eq("patient_id", patient_id).execute()
         account = account_res.data[0] if account_res.data else {"patient_id": patient_id, "balance": 0}
-        
-        unpaid_invoices = supabase.table(TABLES["billing"]).select("*").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
+        current_bal = to_float(account.get("balance", 0))
+
+        if amount <= 0:
+            amount = current_bal  # paiement total si montant non précisé
+        if amount <= 0:
+            return jsonify({"error": "Aucun solde à régler"}), 422
+
+        # 🔄 Marquer les factures impayées comme réglées
+        unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
         for inv in unpaid_invoices:
             supabase.table(TABLES["billing"]).update({
-                "status": "paid",
-                "paid_at": now_iso(),
-                "paid_amount": inv.get("amount", 0),
-                "balance_due": 0,
-                "payment_method": method,
-                "paid_by_user_id": g.current_user["id"],
-                "paid_by_name": g.current_user["name"],
+                "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
+                "balance_due": 0, "payment_method": method,
+                "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
                 "updated_at": now_iso()
             }).eq("id", inv["id"]).execute()
             add_audit("UPDATE", "billing", f"Facture #{inv['id']} soldée via compte patient", inv["id"])
-        
-        current_bal = to_float(account.get("balance", 0))
-        new_balance = max(0.0, current_bal - amount) if amount > 0 else 0.0
+
+        # ✅ Marquer toutes les lignes pending comme payées
+        supabase.table("patient_account_lines").update({
+            "status": "paid", "paid_at": now_iso(),
+            "paid_by": g.current_user["name"], "updated_at": now_iso()
+        }).eq("patient_id", patient_id).eq("status", "pending").execute()
+
+        # 🔄 Remettre le solde à 0 (ou solde restant si paiement partiel)
+        new_balance = round(max(0.0, current_bal - amount), 2)
         if account_res.data:
-            supabase.table("patient_accounts").update({
-                "balance": round(new_balance, 2),
-                "updated_at": now_iso()
-            }).eq("patient_id", patient_id).execute()
+            supabase.table("patient_accounts").update({"balance": new_balance, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
         else:
             compatible_insert("patient_accounts", {
-                "patient_id": patient_id,
-                "balance": round(new_balance, 2),
-                "status": "active",
-                "created_by": g.current_user["id"],
-                "created_by_name": g.current_user["name"],
-                "created_at": now_iso(),
-                "updated_at": now_iso()
+                "patient_id": patient_id, "balance": new_balance, "status": "active",
+                "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
+                "created_at": now_iso(), "updated_at": now_iso()
             })
-        
-        transaction = {
+
+        # 📋 Enregistrer la transaction de paiement
+        compatible_insert("patient_account_transactions", {
             "patient_id": patient_id,
-            "amount": -amount if amount > 0 else -current_bal,
+            "amount": -amount,
             "type": "credit",
             "description": f"Règlement compte ({method})",
-            "balance_after": round(new_balance, 2),
+            "balance_after": new_balance,
             "created_by": g.current_user["id"],
             "created_by_name": g.current_user["name"],
             "created_at": now_iso()
-        }
-        compatible_insert("patient_account_transactions", transaction)
-        
+        })
+
         add_audit("PAYMENT", "patient_account", f"Compte patient #{patient_id} réglé ({amount})", patient_id)
         invalidate_cache()
-        return jsonify({"message": "Compte réglé avec succès", "balance": new_balance}), 200
+        return jsonify({"message": "Compte réglé avec succès", "amount_paid": amount, "balance": new_balance}), 200
 
     # ==================== SUBSCRIBERS ====================
 
