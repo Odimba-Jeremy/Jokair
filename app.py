@@ -618,6 +618,15 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
     amount = round(to_float(amount), 2)
     if not patient_id or amount <= 0:
         return None
+
+    # Garde anti-doublon universelle : si déjà une ligne pour ce (patient_id, source, source_id)
+    if source and source_id:
+        try:
+            dup = supabase.table("patient_account_lines").select("id,amount").eq("patient_id", patient_id).eq("source", source).eq("source_id", source_id).execute()
+            if dup.data:
+                return dup.data[0]
+        except Exception:
+            pass
     line = {
         "patient_id": patient_id,
         "category": category,
