@@ -351,7 +351,8 @@ def register_doctor_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "pharmacie")
     def patch_prescription(prescription_id: int):
         data = fast_json()
-        allowed = ["status", "pharmacy_status", "invoiced"]
+        # NOTE: "invoiced" excluded — column does not exist in live DB schema
+        allowed = ["status", "pharmacy_status"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
         if not updates:
             return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
@@ -363,7 +364,8 @@ def register_doctor_routes(app, *, runtime):
 
         # Facturation automatique si servie/délivrée et pas encore facturée
         is_delivered = updates.get("status") in ("served", "dispensed", "completed") or updates.get("pharmacy_status") == "dispensed"
-        if is_delivered and not row.get("invoiced") and not updates.get("invoiced"):
+        already_billed = row.get("invoiced") or row.get("pharmacy_status") == "dispensed"
+        if is_delivered and not already_billed:
             pat_id = to_int(row.get("patient_id"))
             amount = to_float(data.get("amount") or data.get("price") or 0)
             med_name = (row.get("medication") or row.get("product_name") or "").strip()
@@ -376,11 +378,11 @@ def register_doctor_routes(app, *, runtime):
                     pass
             if pat_id and amount > 0 and "add_patient_account_line" in globals():
                 add_patient_account_line(pat_id, "pharmacie", f"Médicament: {med_name}", amount, "prescription", prescription_id, quantity=1, unit_price=amount)
-            updates["invoiced"] = True
-
+        # Remove any non-existent columns before updating
+        updates.pop("invoiced", None)
         updates["updated_at"] = now_iso()
-        result = supabase.table(TABLES["prescriptions"]).update(updates).eq("id", prescription_id).execute()
-        if not result.data:
+        result = compatible_update(TABLES["prescriptions"], updates, "id", prescription_id)
+        if not result or not getattr(result, "data", None):
             return jsonify({"error": "Prescription introuvable"}), 404
         add_audit("UPDATE", "prescription", f"Prescription #{prescription_id} patchée", prescription_id)
         invalidate_cache()
@@ -405,16 +407,18 @@ def register_doctor_routes(app, *, runtime):
         amount = round(to_float(data.get("amount"), 0), 2)
         updates = {
             "pharmacy_status": "dispensed",
-            "dispensed_at": now_iso(),
-            "dispensed_by": g.current_user["id"],
-            "dispensed_by_name": g.current_user["name"],
+            "status": "served",
             "updated_at": now_iso()
         }
-        result = supabase.table(TABLES["prescriptions"]).update(updates).eq("id", prescription_id).execute()
+        result = compatible_update(TABLES["prescriptions"], updates, "id", prescription_id)
         invoice = None
         if amount > 0:
-            line = add_patient_account_line(to_int(row.get("patient_id")), "medicament", f"Prescription: {row.get('medication', '')}", amount, "prescription", prescription_id)
-            invoice = create_service_invoice(to_int(row.get("patient_id")), f"Médicament: {row.get('medication', '')}", amount, "prescription", prescription_id, line)
+            add_patient_account_line(to_int(row.get("patient_id")), "pharmacie", f"Médicament: {row.get('medication', '')}", amount, "prescription", prescription_id, quantity=1, unit_price=amount)
+            if "create_service_invoice" in globals():
+                try:
+                    invoice = create_service_invoice(to_int(row.get("patient_id")), f"Médicament: {row.get('medication', '')}", amount, "prescription", prescription_id)
+                except Exception:
+                    pass
         compatible_insert("prescription_dispenses", {
             "prescription_id": prescription_id,
             "patient_id": row.get("patient_id"),
@@ -426,7 +430,7 @@ def register_doctor_routes(app, *, runtime):
         })
         add_audit("UPDATE", "prescription", f"Prescription #{prescription_id} delivree", prescription_id)
         invalidate_cache()
-        response = result.data[0] if result.data else updates
+        response = result.data[0] if (result and hasattr(result, "data") and result.data) else updates
         response["invoice"] = invoice
         return jsonify(response)
 
