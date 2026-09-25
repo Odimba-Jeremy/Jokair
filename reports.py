@@ -396,14 +396,14 @@ def register_reports_routes(app, *, runtime):
             print(" Table exchange_rates à créer")
             try:
                 supabase.table("exchange_rates").insert({
-                    "rate": 2800,
+                    "rate": None,
                     "currency_from": "USD",
                     "currency_to": "CDF",
                     "set_by": None,
                     "set_by_name": "Systeme",
                     "created_at": now_iso()
                 }).execute()
-                print(" Table exchange_rates créée avec taux par défaut 2800")
+                print(" Table exchange_rates créée")
             except Exception as e:
                 print(f" Impossible de créer exchange_rates: {e}")
 

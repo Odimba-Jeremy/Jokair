@@ -543,7 +543,18 @@ def register_workflow_routes(app, *, runtime):
         if g.current_user.get("role") not in ("super_admin", "reception"):
             return jsonify({"error": "Ajout manuel reserve a l'accueil/admin"}), 403
         data = fast_json()
-        line = add_patient_account_line(to_int(data.get("patient_id")), data.get("category", "manuel"), data.get("description", data.get("motif", "Frais manuel")), to_float(data.get("amount")), "manual")
+        line = add_patient_account_line(
+            to_int(data.get("patient_id")),
+            data.get("category", "manuel"),
+            data.get("description", data.get("motif", "Frais manuel")),
+            to_float(data.get("amount")),
+            "manual",
+            None,
+            1,
+            None,
+            data.get("idempotency_key"),
+            data.get("currency", "USD")
+        )
         if not line:
             return jsonify({"error": "Ligne invalide"}), 422
         invalidate_cache()

@@ -614,12 +614,31 @@ def add_invoice_payment(invoice_id: int, patient_id: int, amount: float, notes: 
 
 def add_patient_account_line(patient_id: int, category: str, description: str, amount: float,
                              source: str = "", source_id: int = None, quantity: int = 1,
-                             unit_price: float = None):
-    amount = round(to_float(amount), 2)
-    if not patient_id or amount <= 0:
+                             unit_price: float = None, idempotency_key: str = None,
+                             currency_origin: str = "USD"):
+    amount_origin = round(to_float(amount), 2)
+    if not patient_id or amount_origin <= 0:
         return None
 
-    # Garde anti-doublon universelle : si déjà une ligne pour ce (patient_id, source, source_id)
+    # Conversion si la devise d'origine est le Franc Congolais (ex: produit pharmacie en FC)
+    currency_origin = str(currency_origin or "USD").upper()
+    if currency_origin in ["CDF", "FC"]:
+        rate = get_current_rate() or 2250.0
+        amount_usd = round(amount_origin / rate, 2)
+    else:
+        currency_origin = "USD"
+        amount_usd = amount_origin
+
+    # 1. Garde anti-doublon par idempotency_key
+    if idempotency_key:
+        try:
+            dup_key = supabase.table("patient_account_lines").select("id,amount,description").eq("patient_id", patient_id).ilike("description", f"%[idemp:{idempotency_key}]%").execute()
+            if dup_key.data:
+                return dup_key.data[0]
+        except Exception:
+            pass
+
+    # 2. Garde anti-doublon universelle : si déjà une ligne pour ce (patient_id, source, source_id)
     if source and source_id:
         try:
             dup = supabase.table("patient_account_lines").select("id,amount").eq("patient_id", patient_id).eq("source", source).eq("source_id", source_id).execute()
@@ -627,15 +646,21 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
                 return dup.data[0]
         except Exception:
             pass
+
+    stored_description = f"{description} [idemp:{idempotency_key}]" if idempotency_key else description
+
     line = {
         "patient_id": patient_id,
         "category": category,
-        "description": description,
-        "amount": amount,
+        "description": stored_description,
+        "amount": amount_usd,
         "quantity": max(1, to_int(quantity, 1)),
-        "unit_price": round(to_float(unit_price, amount), 2),
+        "unit_price": round(to_float(unit_price, amount_usd), 2),
         "source": source,
         "source_id": source_id,
+        "idempotency_key": idempotency_key,
+        "currency_origin": currency_origin,
+        "amount_origin": amount_origin,
         "status": "pending",
         "created_by": g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None,
         "created_by_name": g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme",
@@ -695,12 +720,12 @@ def create_service_invoice(patient_id: int, description: str, amount: float, sou
 # ==================== FACTURATION AUTOMATIQUE ====================
 def get_current_rate():
     try:
-        result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(1).execute()
-        if result.data:
-            return float(result.data[0].get("rate", 2800))
+        result = supabase.table("exchange_rates").select("rate").order("created_at", desc=True).limit(1).execute()
+        if result.data and result.data[0].get("rate"):
+            return float(result.data[0].get("rate"))
     except Exception:
         pass
-    return 2800
+    return None
 
 def get_tarif_from_db(code_tarif):
     try:
@@ -720,18 +745,20 @@ def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
         print(f"Tarif non trouvé pour le code: {code_tarif}")
         return None
     
-    taux = get_current_rate()
-    prix_usd = to_float(tarif.get("price_usd", 0)) * quantite
-    prix_cdf = prix_usd * taux
+    taux = get_current_rate() or 2250.0
+    prix_usd = round(to_float(tarif.get("price_usd", 0)) * quantite, 2)
+    prix_cdf = round(prix_usd * taux, 2)
     
-    if prix_cdf <= 0:
+    if prix_usd <= 0:
         return None
     
     facture = {
         "invoice_number": f"AUTO-{int(time.time())}-{secrets.token_hex(2).upper()}",
         "patient_id": patient_id,
-        "amount": prix_cdf,
+        "amount": prix_usd,
         "amount_usd": prix_usd,
+        "amount_cdf": prix_cdf,
+        "exchange_rate": taux,
         "description": tarif.get("label", code_tarif),
         "status": "unpaid",
         "source": source or code_tarif,
@@ -740,8 +767,10 @@ def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
             "code": code_tarif,
             "description": tarif.get("label", code_tarif),
             "quantity": quantite,
+            "unit_price": tarif.get("price_usd", 0),
             "unit_price_usd": tarif.get("price_usd", 0),
-            "unit_price_cdf": tarif.get("price_usd", 0) * taux,
+            "unit_price_cdf": round(to_float(tarif.get("price_usd", 0)) * taux, 2),
+            "amount": prix_usd,
             "amount_usd": prix_usd,
             "amount_cdf": prix_cdf
         }],
@@ -755,12 +784,14 @@ def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
     invoice = result.data[0] if result.data else facture
     
     add_patient_account_line(
-        patient_id, 
-        "auto", 
-        tarif.get("label", code_tarif), 
-        prix_cdf, 
-        source or code_tarif, 
-        source_id
+        patient_id=patient_id, 
+        category=tarif.get("category", "soins"), 
+        description=tarif.get("label", code_tarif), 
+        amount=prix_usd, 
+        source=source or code_tarif, 
+        source_id=source_id,
+        quantity=quantite,
+        unit_price=tarif.get("price_usd", 0)
     )
     
     return invoice

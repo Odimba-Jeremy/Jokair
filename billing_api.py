@@ -22,7 +22,7 @@ def register_billing_routes(app, *, runtime):
                 return jsonify(result.data[0])
         except Exception:
             pass
-        return jsonify({"rate": 2800, "currency_from": "USD", "currency_to": "CDF", "created_at": now_iso()})
+        return jsonify({"rate": None, "currency_from": "USD", "currency_to": "CDF", "created_at": now_iso()})
 
     @billing.route("/api/exchange-rate", methods=["POST"])
     @roles_required("super_admin", "reception")
@@ -54,7 +54,49 @@ def register_billing_routes(app, *, runtime):
     def get_exchange_rate_history():
         limit = to_int(request.args.get("limit"), 50)
         result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute()
-        return jsonify(result.data or [])
+    @billing.route("/api/billing/stats", methods=["GET"])
+    @roles_required(*ROLES["staff"])
+    def get_billing_stats():
+        rate = get_current_rate() or 2250.0
+        today_local = datetime.now().strftime("%Y-%m-%d")
+        today_utc = now_iso().split("T")[0]
+        
+        # 1. Transactions de paiements (comptes patients)
+        transactions = supabase.table("patient_account_transactions").select("amount, type, created_at").execute().data or []
+        
+        total_encaisse = 0.0
+        total_today = 0.0
+        
+        for tx in transactions:
+            amt = to_float(tx.get("amount"), 0)
+            if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                val = abs(amt)
+                val_usd = round(val / rate, 2) if val > 1000 else val
+                total_encaisse += val_usd
+                
+                tx_date = str(tx.get("created_at") or "")
+                if tx_date.startswith(today_local) or tx_date.startswith(today_utc):
+                    total_today += val_usd
+                    
+        # 2. Total facturé et Impayés globaux (hors lignes annulées)
+        lines = supabase.table("patient_account_lines").select("amount, status").execute().data or []
+        total_facture = 0.0
+        for l in lines:
+            if str(l.get("status", "")).lower() != "cancelled":
+                amt = to_float(l.get("amount"), 0)
+                amt_usd = round(amt / rate, 2) if amt > 1000 else amt
+                total_facture += amt_usd
+                
+        total_encaisse = round(total_encaisse, 2)
+        total_facture = round(total_facture, 2)
+        solde_global = round(max(0.0, total_facture - total_encaisse), 2)
+        
+        return jsonify({
+            "total_today": round(total_today, 2),
+            "total_encaisse": total_encaisse,
+            "total_facture": total_facture,
+            "solde_global": solde_global
+        })
 
     # ==================== MEDICAL BOXES (MAX 3) ====================
 
@@ -178,7 +220,7 @@ def register_billing_routes(app, *, runtime):
                     item.get("description", "Produit pharmacie"),
                     item.get("amount"),
                     "pharmacy_invoice",
-                    invoice_id,
+                    None,
                     qty,
                     item.get("unit_price")
                 )
@@ -661,14 +703,41 @@ def register_billing_routes(app, *, runtime):
     @roles_required("super_admin", "reception")
     def pay_patient_account_endpoint(patient_id: int):
         data = fast_json()
-        amount = to_float(data.get("amount"), 0)
-        method = data.get("method") or data.get("payment_mode") or "cash"
+        raw_amount = to_float(data.get("amount"), 0)
+        currency = str(data.get("currency") or "USD").upper()
+        idempotency_key = data.get("idempotency_key") or data.get("payment_uid")
 
-        # 1. Calculer dynamiquement le solde réel actuel
-        lines = supabase.table("patient_account_lines").select("amount").eq("patient_id", patient_id).execute().data or []
-        transactions = supabase.table("patient_account_transactions").select("amount, type, created_at").eq("patient_id", patient_id).execute().data or []
+        # 1. Protection Idempotence : si cette clé a déjà été traitée, renvoyer le succès précédent
+        if idempotency_key:
+            try:
+                existing_tx = supabase.table("patient_account_transactions").select("*").eq("patient_id", patient_id).ilike("description", f"%[idemp:{idempotency_key}]%").execute().data
+                if existing_tx:
+                    tx = existing_tx[0]
+                    return jsonify({
+                        "message": "Paiement déjà enregistré (idempotence)",
+                        "amount_paid_usd": abs(to_float(tx.get("amount"), 0)),
+                        "balance": to_float(tx.get("balance_after"), 0)
+                    }), 200
+            except Exception:
+                pass
+
+        # 2. Récupérer le taux du jour
+        rate = get_current_rate()
+
+        # 3. Conversion en USD selon la devise choisie
+        if currency == "CDF" or currency == "FC":
+            if not rate or rate <= 0:
+                return jsonify({"error": "Taux de change non configuré. Veuillez d'abord définir le taux du jour."}), 422
+            amount_usd = round(raw_amount / rate, 2)
+        else:
+            currency = "USD"
+            amount_usd = round(raw_amount, 2)
+
+        # 4. Calculer dynamiquement le solde réel actuel en USD
+        lines = supabase.table("patient_account_lines").select("amount, status").eq("patient_id", patient_id).execute().data or []
+        transactions = supabase.table("patient_account_transactions").select("amount, type").eq("patient_id", patient_id).execute().data or []
         
-        total_facture = sum(to_float(l.get("amount"), 0) for l in lines)
+        total_facture = sum(to_float(l.get("amount"), 0) for l in lines if str(l.get("status", "")).lower() != "cancelled")
         total_paid = 0.0
         for tx in transactions:
             amt = to_float(tx.get("amount"), 0)
@@ -677,30 +746,35 @@ def register_billing_routes(app, *, runtime):
         
         solde_restant = round(max(0.0, total_facture - total_paid), 2)
 
-        if amount <= 0:
-            amount = solde_restant
-        if amount <= 0:
-            return jsonify({"error": "Aucun solde à régler"}), 422
+        if amount_usd <= 0:
+            amount_usd = solde_restant
+            raw_amount = round(amount_usd * rate, 2) if (currency == "CDF" and rate) else amount_usd
 
-        if round(amount, 2) > solde_restant + 0.01:
-            return jsonify({"error": f"Montant ({amount}) dépasse le solde restant ({solde_restant})"}), 422
+        if amount_usd <= 0:
+            return jsonify({"error": "Aucun solde à régler pour ce patient"}), 422
 
-        amount = round(amount, 2)
-        new_balance = round(max(0.0, solde_restant - amount), 2)
+        if round(amount_usd, 2) > solde_restant + 0.01:
+            curr_solde_display = f"{solde_restant} $ USD" + (f" (≈ {int(solde_restant * rate):,} Fc)" if rate else "")
+            return jsonify({"error": f"Le montant ({raw_amount} {currency}) dépasse le solde restant ({curr_solde_display})"}), 422
 
-        # 📋 Enregistrer la transaction de paiement dans tous les cas
-        compatible_insert("patient_account_transactions", {
+        new_balance = round(max(0.0, solde_restant - amount_usd), 2)
+
+        # 5. Enregistrer la transaction de paiement
+        stored_tx_desc = f"Règlement ({raw_amount} {currency})" + (f" [idemp:{idempotency_key}]" if idempotency_key else "")
+        tx_payload = {
             "patient_id": patient_id,
-            "amount": -amount,  # Historiquement, les paiements sont négatifs ici
+            "amount": -amount_usd,
             "type": "credit",
-            "description": f"Règlement compte ({method})",
+            "description": stored_tx_desc,
             "balance_after": new_balance,
+            "idempotency_key": idempotency_key,
             "created_by": g.current_user["id"],
             "created_by_name": g.current_user["name"],
             "created_at": now_iso()
-        })
+        }
+        compatible_insert("patient_account_transactions", tx_payload)
 
-        # Mettre à jour le cache
+        # 6. Mettre à jour le cache de balance
         account_res = supabase.table("patient_accounts").select("id").eq("patient_id", patient_id).execute()
         if account_res.data:
             supabase.table("patient_accounts").update({"balance": new_balance, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
@@ -711,13 +785,12 @@ def register_billing_routes(app, *, runtime):
                 "created_at": now_iso(), "updated_at": now_iso()
             })
 
-        # 🔄 Actions complémentaires SI paiement total atteint
+        # 7. Clôture complémentaire si solde intégralement payé
         if new_balance <= 0:
             unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
             for inv in unpaid_invoices:
                 compatible_update(TABLES["billing"], {
                     "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
-                    "payment_method": method,
                     "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
                     "updated_at": now_iso()
                 }, "id", inv["id"])
@@ -727,9 +800,16 @@ def register_billing_routes(app, *, runtime):
                 "updated_at": now_iso()
             }).eq("patient_id", patient_id).eq("status", "pending").execute()
 
-        add_audit("PAYMENT", "patient_account", f"Compte patient #{patient_id} réglé ({amount})", patient_id)
+        add_audit("PAYMENT", "patient_account", f"Compte #{patient_id} réglé : {raw_amount} {currency} ({amount_usd} $)", patient_id)
         invalidate_cache()
-        return jsonify({"message": "Compte réglé avec succès", "amount_paid": amount, "balance": new_balance}), 200
+        return jsonify({
+            "message": "Compte réglé avec succès",
+            "amount_paid_usd": amount_usd,
+            "amount_received": raw_amount,
+            "currency": currency,
+            "rate": rate,
+            "balance": new_balance
+        }), 200
 
     # ==================== SUBSCRIBERS ====================
 
