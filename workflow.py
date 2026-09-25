@@ -738,8 +738,11 @@ def register_workflow_routes(app, *, runtime):
         
         if daily_rate > 0:
             amount = days * daily_rate
-            add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s)", amount, "hospitalization", hosp_id, days, daily_rate)
-            facture_auto(to_int(row.get("patient_id")), "HOSPI_JOUR", days, "hospitalization", hosp_id)
+            # facture_auto appelle déjà add_patient_account_line en interne.
+            # Si le tarif HOSPI_JOUR n'existe pas en DB, fallback direct.
+            hosp_result = facture_auto(to_int(row.get("patient_id")), "HOSPI_JOUR", days, "hospitalization", hosp_id)
+            if not hosp_result:
+                add_patient_account_line(to_int(row.get("patient_id")), "hospitalisation", f"Hospitalisation {days} jour(s) à {daily_rate}$/j", amount, "hospitalization", hosp_id, days, daily_rate)
         supabase.table(TABLES["patients"]).update({"status": "discharged", "updated_at": now_iso()}).eq("id", row.get("patient_id")).execute()
         add_audit("UPDATE", "hospitalization", f"Sortie hospitalisation #{hosp_id}", hosp_id)
         invalidate_cache()
