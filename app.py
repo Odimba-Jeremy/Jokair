@@ -576,9 +576,8 @@ def get_tariff_amount(category: str, label: str = "", default: float = 0.0) -> f
     if label_key:
         for row in rows:
             if str(row.get("label", "")).strip().lower() == label_key:
-                # price_usd est le champ réel dans la table tariffs
-                return to_float(row.get("price_usd") or row.get("amount"), default)
-    return to_float(rows[0].get("price_usd") or rows[0].get("amount"), default)
+                return to_float(row.get("amount"), default)
+    return to_float(rows[0].get("amount"), default)
 
 def parse_json_array(value: Any) -> list:
     if isinstance(value, list):
@@ -670,17 +669,17 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
     }
     try:
         result = compatible_insert("patient_account_lines", line)
-        # 🔄 Mise à jour automatique du solde dans patient_accounts (toujours en USD)
+        # 🔄 Mise à jour automatique du solde dans patient_accounts
         try:
             acc = supabase.table("patient_accounts").select("id,balance").eq("patient_id", patient_id).execute()
             if acc.data:
-                new_bal = round(to_float(acc.data[0].get("balance", 0)) + amount_usd, 2)
+                new_bal = round(to_float(acc.data[0].get("balance", 0)) + amount, 2)
                 supabase.table("patient_accounts").update({"balance": new_bal, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
             else:
                 creator_id = g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None
                 creator_name = g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme"
                 compatible_insert("patient_accounts", {
-                    "patient_id": patient_id, "balance": amount_usd, "status": "active",
+                    "patient_id": patient_id, "balance": amount, "status": "active",
                     "created_by": creator_id,
                     "created_by_name": creator_name,
                     "created_at": now_iso(), "updated_at": now_iso()
@@ -729,33 +728,16 @@ def get_current_rate():
     return None
 
 def get_tarif_from_db(code_tarif):
-    code_upper = str(code_tarif or "").strip().upper()
     try:
-        # 1. Recherche par label ou category dans tariff_grid
-        result = supabase.table(TABLES["tariffs"]).select("*").eq("is_active", True).execute()
-        rows = result.data or []
-        for r in rows:
-            r_label = str(r.get("label") or "").strip().upper()
-            r_cat = str(r.get("category") or "").strip().upper()
-            r_code = str(r.get("code") or "").strip().upper()
-            if code_upper in (r_code, r_label, r_cat) or r_label == code_upper:
-                return {
-                    "label": r.get("label", code_tarif),
-                    "category": r.get("category", "soins"),
-                    "price_usd": to_float(r.get("price_usd") or r.get("amount"), 0)
-                }
+        result = supabase.table(TABLES["tariffs"]).select("*").eq("code", code_tarif).eq("is_active", True).execute()
+        if result.data:
+            return result.data[0]
+        result = supabase.table(TABLES["tariffs"]).select("*").eq("category", code_tarif).eq("is_active", True).execute()
+        if result.data:
+            return result.data[0]
+        return None
     except Exception:
-        pass
-    
-    # 2. Fallback robuste sur le catalogue interne TARIFS
-    if code_upper in TARIFS:
-        t = TARIFS[code_upper]
-        return {
-            "label": t.get("label", code_tarif),
-            "category": t.get("category", "soins"),
-            "price_usd": to_float(t.get("price_usd"), 0)
-        }
-    return None
+        return None
 
 def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
     tarif = get_tarif_from_db(code_tarif)
@@ -764,8 +746,7 @@ def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
         return None
     
     taux = get_current_rate() or 2250.0
-    unit_p = to_float(tarif.get("price_usd") or tarif.get("amount"), 0)
-    prix_usd = round(unit_p * quantite, 2)
+    prix_usd = round(to_float(tarif.get("price_usd", 0)) * quantite, 2)
     prix_cdf = round(prix_usd * taux, 2)
     
     if prix_usd <= 0:

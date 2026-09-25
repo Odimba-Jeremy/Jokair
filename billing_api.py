@@ -54,38 +54,6 @@ def register_billing_routes(app, *, runtime):
     def get_exchange_rate_history():
         limit = to_int(request.args.get("limit"), 50)
         result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute()
-        return jsonify(result.data or [])
-
-    @billing.route("/api/billing/tariffs-check", methods=["GET"])
-    @roles_required("super_admin", "reception")
-    def check_missing_tariffs():
-        """Diagnostic : liste les codes tarifs requis par le système et signale lesquels manquent en DB."""
-        REQUIRED_CODES = [
-            {"code": "CONSULTATION",   "label": "Consultation médicale",     "category": "consultation",   "price_usd": 5.0},
-            {"code": "HOSPI_JOUR",     "label": "Hospitalisation par jour",  "category": "hospitalisation","price_usd": 20.0},
-            {"code": "SOIN_BASE",      "label": "Soin de base",              "category": "soins",          "price_usd": 2.0},
-            {"code": "SOIN_PANSEMENT", "label": "Pansement",                 "category": "soins",          "price_usd": 3.0},
-            {"code": "SOIN_INJECTION", "label": "Injection",                 "category": "soins",          "price_usd": 2.0},
-            {"code": "SOIN_PERFUSION", "label": "Perfusion",                 "category": "soins",          "price_usd": 5.0},
-            {"code": "SOIN_SUTURE",    "label": "Suture",                    "category": "soins",          "price_usd": 8.0},
-            {"code": "SOIN_PLATRE",    "label": "Plâtre",                    "category": "soins",          "price_usd": 15.0},
-            {"code": "ANALYSE_BASE",   "label": "Analyse biologique",        "category": "analyse",        "price_usd": 5.0},
-            {"code": "ACC_VAG",        "label": "Accouchement vaginal",      "category": "maternite",      "price_usd": 50.0},
-            {"code": "ACC_CES",        "label": "Accouchement césarienne",   "category": "maternite",      "price_usd": 150.0},
-        ]
-        try:
-            existing = supabase.table(TABLES["tariffs"]).select("code,label,price_usd,category,is_active").execute().data or []
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
-        existing_codes = {r["code"].upper() for r in existing if r.get("code")}
-        missing = [t for t in REQUIRED_CODES if t["code"] not in existing_codes]
-        return jsonify({
-            "existing_count": len(existing),
-            "missing_count": len(missing),
-            "missing": missing,
-            "existing": existing
-        })
-
     @billing.route("/api/billing/stats", methods=["GET"])
     @roles_required(*ROLES["staff"])
     def get_billing_stats():

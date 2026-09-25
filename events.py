@@ -30,14 +30,8 @@ def broadcast_event(event_type: str, payload: dict[str, Any] | None = None) -> d
 @events_bp.route("/api/events/stream", methods=["GET"])
 def event_stream():
     """Flux Server-Sent Events (SSE) avec ping régulier de maintien de connexion."""
-    # ⚠️ Capturer AVANT le générateur : avec gunicorn sync worker,
-    # le contexte de requête est détruit dès que le générateur commence à itérer.
-    try:
-        last_id_init = int(request.args.get("last_event_id", 0))
-    except (ValueError, TypeError):
-        last_id_init = 0
-
-    def generate(last_id):
+    def generate():
+        last_id = int(request.args.get("last_event_id", 0))
         # Envoyer les événements manqués
         for ev in _EVENTS_BUFFER:
             if ev["id"] > last_id:
@@ -56,7 +50,7 @@ def event_stream():
             time.sleep(2)
 
     return Response(
-        generate(last_id_init),
+        generate(),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
