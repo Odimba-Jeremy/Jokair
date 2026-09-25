@@ -267,14 +267,15 @@ def register_billing_routes(app, *, runtime):
         if not result.data:
             return jsonify({"error": "Facture introuvable"}), 404
         
-        add_patient_account_line(
-            invoice_data.get("patient_id"),
-            "paiement",
-            f"Paiement facture #{invoice_id}",
-            -amount if amount > 0 else -invoice_data.get("amount", 0),
-            "payment",
-            invoice_id
-        )
+        compatible_insert("patient_account_transactions", {
+            "patient_id": invoice_data.get("patient_id"),
+            "amount": -amount if amount > 0 else -invoice_data.get("amount", 0),
+            "type": "credit",
+            "description": f"Paiement facture #{invoice_id}",
+            "created_by": g.current_user["id"],
+            "created_by_name": g.current_user["name"],
+            "created_at": now_iso()
+        })
         
         add_audit("UPDATE", "billing", f"Facture #{invoice_id} payée", invoice_id)
         invalidate_cache()
@@ -306,14 +307,15 @@ def register_billing_routes(app, *, runtime):
         
         result = supabase.table(TABLES["billing"]).update(updates).eq("id", invoice_id).execute()
         add_invoice_payment(invoice_id, invoice_data.get("patient_id"), amount, f"Acompte / Paiement partiel")
-        add_patient_account_line(
-            invoice_data.get("patient_id"),
-            "paiement",
-            f"Acompte facture #{invoice_id}",
-            -amount,
-            "payment",
-            invoice_id
-        )
+        compatible_insert("patient_account_transactions", {
+            "patient_id": invoice_data.get("patient_id"),
+            "amount": -amount,
+            "type": "credit",
+            "description": f"Acompte facture #{invoice_id}",
+            "created_by": g.current_user["id"],
+            "created_by_name": g.current_user["name"],
+            "created_at": now_iso()
+        })
         
         add_audit("UPDATE", "billing", f"Paiement partiel #{invoice_id}: {amount}", invoice_id)
         invalidate_cache()
@@ -459,11 +461,43 @@ def register_billing_routes(app, *, runtime):
     @roles_required("super_admin", "reception")
     @cached(120)
     def get_billing_accounts():
-        result = supabase.table("patient_accounts").select("*").order("patient_id").execute()
-        accounts = result.data or []
+        # Source de vérité financière : Lignes facturées - Transactions payées
+        lines = supabase.table("patient_account_lines").select("patient_id, amount").execute().data or []
+        transactions = supabase.table("patient_account_transactions").select("patient_id, amount, type").execute().data or []
+        
+        patient_totals = {}
+        for l in lines:
+            pid = l.get("patient_id")
+            if pid:
+                patient_totals[pid] = patient_totals.get(pid, 0.0) + to_float(l.get("amount"), 0)
+                
+        patient_paid = {}
+        for tx in transactions:
+            pid = tx.get("patient_id")
+            if pid:
+                amt = to_float(tx.get("amount"), 0)
+                if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                    patient_paid[pid] = patient_paid.get(pid, 0.0) + abs(amt)
+                    
+        accounts = []
         patients = get_patient_map()
-        for acc in accounts:
-            acc["patient_name"] = patients.get(acc.get("patient_id"), "Inconnu")
+        
+        for pid, total_facture in patient_totals.items():
+            total_paid = patient_paid.get(pid, 0.0)
+            solde = round(max(0.0, total_facture - total_paid), 2)
+            
+            if solde > 0:
+                accounts.append({
+                    "patient_id": pid,
+                    "patient_name": patients.get(pid, "Inconnu"),
+                    "balance": solde,
+                    "total_facture": round(total_facture, 2),
+                    "total_paid": round(total_paid, 2),
+                    "status": "active"
+                })
+        
+        # Tri par solde décroissant (les plus gros débiteurs d'abord)
+        accounts.sort(key=lambda x: x["balance"], reverse=True)
         return jsonify(accounts)
 
     @billing.route("/api/billing/accounts", methods=["POST"])
@@ -506,7 +540,7 @@ def register_billing_routes(app, *, runtime):
     @billing.route("/api/billing/accounts/<int:patient_id>/full", methods=["GET"])
     @roles_required("super_admin", "reception")
     def get_full_billing_account(patient_id: int):
-        # Lecture directe depuis patient_account_lines (source de vérité pour tous les actes)
+        # La vérité financière est calculée via: Facturation globale - Paiements globaux
         account_result = supabase.table("patient_accounts").select("*").eq("patient_id", patient_id).execute()
         lines = supabase.table("patient_account_lines").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
         transactions = supabase.table("patient_account_transactions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
@@ -514,11 +548,17 @@ def register_billing_routes(app, *, runtime):
         account = account_result.data[0] if account_result.data else {"patient_id": patient_id, "balance": 0, "status": "inactive"}
         account["patient"] = patient_result.data[0] if patient_result.data else None
 
-        pending_lines = [l for l in lines if str(l.get("status") or "").lower() == "pending"]
-        paid_lines    = [l for l in lines if str(l.get("status") or "").lower() == "invoiced"]
-        total_pending = round(sum(to_float(l.get("amount"), 0) for l in pending_lines), 2)
-        total_paid    = round(sum(to_float(l.get("amount"), 0) for l in paid_lines), 2)
-        total_all     = round(sum(to_float(l.get("amount"), 0) for l in lines), 2)
+        # Calcul robuste
+        total_facture = round(sum(to_float(l.get("amount"), 0) for l in lines), 2)
+        
+        total_paid_real = 0.0
+        for tx in transactions:
+            amt = to_float(tx.get("amount"), 0)
+            if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                total_paid_real += abs(amt)
+        total_paid_real = round(total_paid_real, 2)
+        
+        solde_restant = round(max(0.0, total_facture - total_paid_real), 2)
 
         # Normalisation pour l'affichage de l'interface (badges de statut et libellé de service)
         normalized_lines = []
@@ -538,14 +578,15 @@ def register_billing_routes(app, *, runtime):
             tx_copy["amount"] = abs(raw_amt)
             normalized_payments.append(tx_copy)
 
-        account["status"] = "OPEN" if total_pending > 0 else ("PAID" if lines else "SOLDE")
+        account["status"] = "OPEN" if solde_restant > 0 else ("PAID" if lines else "EMPTY")
         account["lines"] = normalized_lines
         account["payments"] = normalized_payments
-        account["total"] = total_pending  # Montant restant à régler par le patient
-        account["total_pending"] = total_pending
-        account["total_paid"] = total_paid
-        account["total_all"] = total_all
-        account["balance"] = total_pending
+        account["total"] = solde_restant          # Reste à payer pour le nouveau frontend
+        account["total_facture"] = total_facture  # Nouveau champ
+        account["total_pending"] = solde_restant  # Fallback compatibilité ancien frontend
+        account["total_paid"] = total_paid_real   # Vrai montant payé
+        account["total_all"] = total_facture
+        account["balance"] = solde_restant
         return jsonify(account)
 
     @billing.route("/api/billing/accounts/update", methods=["POST"])
@@ -623,34 +664,44 @@ def register_billing_routes(app, *, runtime):
         amount = to_float(data.get("amount"), 0)
         method = data.get("method") or data.get("payment_mode") or "cash"
 
-        account_res = supabase.table("patient_accounts").select("*").eq("patient_id", patient_id).execute()
-        account = account_res.data[0] if account_res.data else {"patient_id": patient_id, "balance": 0}
-        current_bal = to_float(account.get("balance", 0))
+        # 1. Calculer dynamiquement le solde réel actuel
+        lines = supabase.table("patient_account_lines").select("amount").eq("patient_id", patient_id).execute().data or []
+        transactions = supabase.table("patient_account_transactions").select("amount, type, created_at").eq("patient_id", patient_id).execute().data or []
+        
+        total_facture = sum(to_float(l.get("amount"), 0) for l in lines)
+        total_paid = 0.0
+        for tx in transactions:
+            amt = to_float(tx.get("amount"), 0)
+            if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                total_paid += abs(amt)
+        
+        solde_restant = round(max(0.0, total_facture - total_paid), 2)
 
         if amount <= 0:
-            amount = current_bal  # paiement total si montant non précisé
+            amount = solde_restant
         if amount <= 0:
             return jsonify({"error": "Aucun solde à régler"}), 422
 
-        # 🔄 Marquer les factures impayées comme réglées
-        unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
-        for inv in unpaid_invoices:
-            compatible_update(TABLES["billing"], {
-                "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
-                "payment_method": method,
-                "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
-                "updated_at": now_iso()
-            }, "id", inv["id"])
-            add_audit("UPDATE", "billing", f"Facture #{inv['id']} soldée via compte patient", inv["id"])
+        if round(amount, 2) > solde_restant + 0.01:
+            return jsonify({"error": f"Montant ({amount}) dépasse le solde restant ({solde_restant})"}), 422
 
-        # ✅ Marquer toutes les lignes pending comme payées (statut PostgreSQL 'invoiced')
-        supabase.table("patient_account_lines").update({
-            "status": "invoiced",
-            "updated_at": now_iso()
-        }).eq("patient_id", patient_id).eq("status", "pending").execute()
+        amount = round(amount, 2)
+        new_balance = round(max(0.0, solde_restant - amount), 2)
 
-        # 🔄 Remettre le solde à 0 (ou solde restant si paiement partiel)
-        new_balance = round(max(0.0, current_bal - amount), 2)
+        # 📋 Enregistrer la transaction de paiement dans tous les cas
+        compatible_insert("patient_account_transactions", {
+            "patient_id": patient_id,
+            "amount": -amount,  # Historiquement, les paiements sont négatifs ici
+            "type": "credit",
+            "description": f"Règlement compte ({method})",
+            "balance_after": new_balance,
+            "created_by": g.current_user["id"],
+            "created_by_name": g.current_user["name"],
+            "created_at": now_iso()
+        })
+
+        # Mettre à jour le cache
+        account_res = supabase.table("patient_accounts").select("id").eq("patient_id", patient_id).execute()
         if account_res.data:
             supabase.table("patient_accounts").update({"balance": new_balance, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
         else:
@@ -660,17 +711,21 @@ def register_billing_routes(app, *, runtime):
                 "created_at": now_iso(), "updated_at": now_iso()
             })
 
-        # 📋 Enregistrer la transaction de paiement
-        compatible_insert("patient_account_transactions", {
-            "patient_id": patient_id,
-            "amount": -amount,
-            "type": "credit",
-            "description": f"Règlement compte ({method})",
-            "balance_after": new_balance,
-            "created_by": g.current_user["id"],
-            "created_by_name": g.current_user["name"],
-            "created_at": now_iso()
-        })
+        # 🔄 Actions complémentaires SI paiement total atteint
+        if new_balance <= 0:
+            unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
+            for inv in unpaid_invoices:
+                compatible_update(TABLES["billing"], {
+                    "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
+                    "payment_method": method,
+                    "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
+                    "updated_at": now_iso()
+                }, "id", inv["id"])
+
+            supabase.table("patient_account_lines").update({
+                "status": "invoiced",
+                "updated_at": now_iso()
+            }).eq("patient_id", patient_id).eq("status", "pending").execute()
 
         add_audit("PAYMENT", "patient_account", f"Compte patient #{patient_id} réglé ({amount})", patient_id)
         invalidate_cache()

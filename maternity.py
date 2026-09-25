@@ -34,7 +34,8 @@ def register_maternity_routes(app, *, runtime):
         if not row:
             return None
         consultation = row[0]
-        if g.current_user.get("role") == "docteur" and str(consultation.get("doctor_id") or "") != str(g.current_user.get("id") or ""):
+        creator_id = str(consultation.get("doctor_id") or consultation.get("created_by") or "")
+        if g.current_user.get("role") == "docteur" and creator_id and creator_id != str(g.current_user.get("id") or ""):
             return False
         return consultation
 
@@ -145,9 +146,9 @@ def register_maternity_routes(app, *, runtime):
     def get_pregnancy_followups(pregnancy_id: int):
         query = supabase.table("prenatal_consultations").select("*").eq("pregnancy_id", pregnancy_id)
         if g.current_user.get("role") == "docteur":
-            query = query.eq("doctor_id", g.current_user.get("id"))
+            query = query.eq("created_by", g.current_user.get("id"))
         result = query.order("visit_date", desc=True).execute()
-        return jsonify(result.data)
+        return jsonify(result.data or [])
 
     @maternity.route("/api/maternity/prenatal", methods=["GET"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")
@@ -157,15 +158,15 @@ def register_maternity_routes(app, *, runtime):
         pregnancy_id = request.args.get("pregnancy_id")
         query = supabase.table("prenatal_consultations").select("*")
         if g.current_user.get("role") == "docteur":
-            query = query.eq("doctor_id", g.current_user.get("id"))
+            query = query.eq("created_by", g.current_user.get("id"))
         if patient_id:
             query = query.eq("patient_id", to_int(patient_id))
         if pregnancy_id:
             query = query.eq("pregnancy_id", to_int(pregnancy_id))
         result = query.order("visit_date", desc=True).execute()
-        consultations = result.data
+        consultations = result.data or []
         patients_result = supabase.table(TABLES["patients"]).select("id", "full_name").execute()
-        patient_map = {p["id"]: p["full_name"] for p in patients_result.data}
+        patient_map = {p["id"]: p["full_name"] for p in (patients_result.data or [])}
         for c in consultations:
             c["patient_name"] = patient_map.get(c.get("patient_id"), "Inconnu")
             if not c.get("visit_number") and c.get("observations"):
