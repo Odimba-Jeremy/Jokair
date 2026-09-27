@@ -12,6 +12,113 @@ def register_medical_routes(app, *, runtime):
     globals().update(runtime)
     medical = Blueprint("medical", __name__)
 
+    def bill_care_session(patient_id, care_id, metadata):
+        """Débite une séance validée une seule fois, au moment de la prescription.
+
+        Les produits gardent leur devise de stock; les actes prennent le tarif
+        correspondant dans la grille. La clé d'idempotence est par élément afin
+        qu'une séance contenant plusieurs produits ne puisse ni être oubliée ni
+        être facturée deux fois.
+        """
+        product_ids = []
+        for item in (metadata.get("injectables") or []) + (metadata.get("consumables") or []):
+            product_id = to_int(item.get("product_id"), 0)
+            if product_id:
+                product_ids.append(product_id)
+
+        stock = {}
+        if product_ids:
+            try:
+                rows = supabase.table(TABLES["pharmacy"]).select(
+                    "id,medication_name,selling_price,price_currency"
+                ).in_("id", product_ids).execute().data or []
+            except Exception:
+                # Anciennes bases où price_currency n'existe pas encore.
+                rows = supabase.table(TABLES["pharmacy"]).select(
+                    "id,medication_name,selling_price"
+                ).in_("id", product_ids).execute().data or []
+            stock = {to_int(row.get("id")): row for row in rows}
+
+        try:
+            tariffs = supabase.table(TABLES["tariffs"]).select("*").eq("is_active", True).execute().data or []
+        except Exception:
+            tariffs = []
+
+        billed, missing_prices = [], []
+
+        def add_line(kind, index, category, description, quantity, price, currency):
+            quantity = max(1, to_int(quantity, 1))
+            price = to_float(price, 0)
+            if price <= 0:
+                missing_prices.append(description)
+                return
+            amount = round(quantity * price, 2)
+            line = add_patient_account_line(
+                patient_id=patient_id,
+                category=category,
+                description=description,
+                amount=amount,
+                source="care_prescription",
+                # Plusieurs lignes par séance : l'idempotence, pas source_id,
+                # est la protection anti-doublon de chaque élément.
+                source_id=None,
+                quantity=quantity,
+                unit_price=price,
+                idempotency_key=f"care-{care_id}-{kind}-{index}",
+                currency_origin=currency,
+            )
+            if line:
+                billed.append(description)
+
+        DEFAULT_ACT_PRICES = {
+            "injection": 3.0, "soin_injection": 3.0, "act001": 3.0,
+            "perfusion": 8.0, "soin_perfusion": 8.0, "act002": 8.0,
+            "pansement": 5.0, "soin_pansement": 5.0, "act003": 5.0,
+            "surveillance": 5.0, "act004": 5.0,
+            "nebulisation": 6.0, "act005": 6.0,
+            "suture": 10.0, "soin_suture": 10.0, "act006": 10.0,
+            "platre": 20.0, "plâtre": 20.0, "soin_platre": 20.0, "act007": 20.0,
+            "extraction": 15.0, "act008": 15.0,
+            "reeducation": 10.0, "act009": 10.0,
+            "prelevement": 5.0, "act010": 5.0,
+            "transfusion": 25.0, "act011": 25.0,
+            "soin de plaie": 5.0, "act012": 5.0,
+            "catheterisme": 8.0, "act013": 8.0,
+            "intubation": 30.0, "act014": 30.0,
+            "ventilation": 25.0, "act015": 25.0,
+            "soin": 5.0
+        }
+
+        for kind, items in (("injectable", metadata.get("injectables") or []),
+                            ("consumable", metadata.get("consumables") or [])):
+            for index, item in enumerate(items):
+                product = stock.get(to_int(item.get("product_id"), 0), {})
+                name = item.get("product_name") or item.get("name") or product.get("medication_name") or "Produit de soin"
+                currency = item.get("price_currency") or item.get("currency") or product.get("price_currency") or "FC"
+                price = item.get("unit_price") or item.get("selling_price") or product.get("selling_price")
+                if not price or to_float(price, 0) <= 0:
+                    price = 2500.0 if str(currency).upper() in ("FC", "CDF") else 2.0
+                add_line(kind, index, "pharmacie", f"Produit soin: {name}", item.get("quantity"), price, currency)
+
+        for index, act in enumerate(metadata.get("acts") or []):
+            name = act.get("name") or act.get("product_name") or act.get("act_type") or "Acte de soin"
+            act_id = str(act.get("id") or act.get("act_type") or "").strip().lower()
+            name_clean = str(name).strip().lower().replace("â", "a").replace("é", "e").replace("è", "e")
+            tariff = next((row for row in tariffs if str(row.get("code") or row.get("id") or "").strip().lower() in (act_id, name_clean)
+                           or str(row.get("label") or "").strip().lower().replace("â", "a").replace("é", "e") in (act_id, name_clean)), None)
+            fallback_act_price = DEFAULT_ACT_PRICES.get(act_id) or DEFAULT_ACT_PRICES.get(name_clean) or 5.0
+            price = act.get("unit_price") or act.get("price") or (tariff or {}).get("amount") or (tariff or {}).get("price_usd") or fallback_act_price
+            currency = act.get("price_currency") or act.get("currency") or (tariff or {}).get("price_currency") or "USD"
+            add_line("act", index, "soins", f"Acte de soin: {name}", act.get("quantity") or act.get("repetitions"), price, currency)
+
+        metadata["billing"] = {
+            "charged_at": now_iso(),
+            "charged_items": billed,
+            "unpriced_items": missing_prices,
+            "mode": "prescription",
+        }
+        return metadata
+
     @app.route("/api/care", methods=["GET"])
     @roles_required(*ROLES["staff"])
     @cached(60)
@@ -62,8 +169,24 @@ def register_medical_routes(app, *, runtime):
         result = compatible_insert(TABLES["care"], care)
         created_care = result.data[0] if result.data else care
     
+        # Même règle que pour les séances : une prestation va d'abord dans le
+        # compte patient. La facture imprimable n'est créée qu'au règlement,
+        # sinon facture_auto crée à la fois une facture et une seconde ligne.
         tarif_code = get_tarif_code_for_care(care_type)
-        facture_auto(patient_id, tarif_code, 1, "care", created_care.get("id"))
+        tarif = get_tarif_from_db(tarif_code)
+        amount = to_float((tarif or {}).get("price_usd") or (tarif or {}).get("amount"), 0)
+        if amount > 0:
+            add_patient_account_line(
+                patient_id=patient_id,
+                category=(tarif or {}).get("category", "soins"),
+                description=(tarif or {}).get("label", care_type),
+                amount=amount,
+                source="care",
+                source_id=created_care.get("id"),
+                quantity=1,
+                unit_price=amount,
+                currency_origin="USD",
+            )
     
         add_audit("CREATE", "care", f"Soin #{created_care.get('id')}", created_care.get("id"))
         invalidate_cache()
@@ -255,6 +378,13 @@ def register_medical_routes(app, *, runtime):
             }
             result = compatible_insert(TABLES["care"], care)
             created_row = result.data[0] if result.data else care
+            # Un brouillon reste non facturé. Une prescription envoyée crée les
+            # lignes du compte immédiatement, avant toute délivrance pharmacie.
+            if data.get("status", "pending") != "draft" and created_row.get("id"):
+                session_meta = bill_care_session(patient_id, created_row["id"], session_meta)
+                description = json.dumps(session_meta, ensure_ascii=False)
+                compatible_update(TABLES["care"], {"description": description, "updated_at": now_iso()}, "id", created_row["id"])
+                created_row["description"] = description
             add_audit("CREATE", "care", f"Prescription séance de soins #{patient_id}", patient_id)
             invalidate_cache()
             return jsonify({"items": [created_row], "session": session_meta}), 201
@@ -339,69 +469,10 @@ def register_medical_routes(app, *, runtime):
             meta["delivered_by"] = g.current_user.get("id")
             meta["delivered_by_name"] = g.current_user.get("name")
 
-            # Facturation automatique des produits de soin délivrés
-            if not meta.get("delivered_and_billed"):
-                meta["delivered_and_billed"] = True
-                pat_id = to_int(row.get("patient_id"))
-                if pat_id:
-                    items_to_bill = []
-                    # 1. Injectables
-                    for inj in (meta.get("injectables") or []):
-                        items_to_bill.append({
-                            "product_id": inj.get("product_id"),
-                            "product_name": inj.get("product_name") or inj.get("name") or "Injectable",
-                            "quantity": max(1, to_int(inj.get("quantity"), 1)),
-                            "unit_price": to_float(inj.get("unit_price") or inj.get("selling_price") or 0)
-                        })
-                    # 2. Consommables
-                    for cons in (meta.get("consumables") or []):
-                        items_to_bill.append({
-                            "product_id": cons.get("product_id"),
-                            "product_name": cons.get("product_name") or cons.get("name") or "Consommable",
-                            "quantity": max(1, to_int(cons.get("quantity"), 1)),
-                            "unit_price": to_float(cons.get("unit_price") or cons.get("selling_price") or 0)
-                        })
-                    # 3. Soin unitaire
-                    if not items_to_bill and not meta.get("is_session"):
-                        p_id = meta.get("product_id") or row.get("product_id")
-                        p_name = meta.get("product_name") or row.get("medication") or row.get("care_type") or "Produit de soin"
-                        items_to_bill.append({
-                            "product_id": p_id,
-                            "product_name": p_name,
-                            "quantity": max(1, to_int(meta.get("quantity") or row.get("quantity"), 1)),
-                            "unit_price": to_float(meta.get("unit_price") or row.get("price") or 0)
-                        })
-
-                    # Récupérer les prix depuis le stock pharmacie pour tout produit sans prix unitaire
-                    needed_ids = [to_int(it["product_id"]) for it in items_to_bill if it.get("product_id")]
-                    stock_prices = {}
-                    if needed_ids:
-                        try:
-                            p_res = supabase.table(TABLES["pharmacy"]).select("id,medication_name,selling_price").in_("id", needed_ids).execute()
-                            for p in (p_res.data or []):
-                                stock_prices[to_int(p["id"])] = to_float(p.get("selling_price"), 0)
-                        except Exception as pe:
-                            print(f"Erreur lookup stock prix: {pe}")
-
-                    for item in items_to_bill:
-                        p_id = to_int(item.get("product_id"))
-                        u_price = item.get("unit_price", 0)
-                        if (not u_price or u_price <= 0) and p_id and p_id in stock_prices:
-                            u_price = stock_prices[p_id]
-                        
-                        qty = max(1, item.get("quantity", 1))
-                        line_amount = round(u_price * qty, 2)
-                        if line_amount > 0 and "add_patient_account_line" in globals():
-                            add_patient_account_line(
-                                patient_id=pat_id,
-                                category="pharmacie",
-                                description=f"Produit soin: {item.get('product_name')}",
-                                amount=line_amount,
-                                source="care_delivery",
-                                source_id=care_id,
-                                quantity=qty,
-                                unit_price=u_price
-                            )
+            # La délivrance confirme uniquement la disponibilité des produits.
+            # La facturation a déjà été faite à l'envoi de la prescription : la
+            # refaire ici créait des doublons et pouvait perdre la devise FC.
+            meta["delivered_and_billed"] = True
 
         updates = {
             "status": status_val,

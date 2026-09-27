@@ -30,9 +30,12 @@ def register_workflow_routes(app, *, runtime):
 
     def enrich_queue_rows(rows):
         patients = get_patient_map()
-        for row in rows:
+        sorted_rows = sorted(rows, key=lambda r: str(r.get("created_at") or r.get("updated_at") or ""))
+        for index, row in enumerate(sorted_rows):
             row["patient_name"] = patients.get(row.get("patient_id"), row.get("patient_name") or "Inconnu")
-        return rows
+            row["queue_position"] = index + 1
+            row["ticket_number"] = f"N° {index + 1}"
+        return sorted_rows
 
     def queue_uid(data):
         supplied = str(data.get("uid") or "").strip().upper()
@@ -493,7 +496,7 @@ def register_workflow_routes(app, *, runtime):
             "updated_at": now_iso()
         }
         result = compatible_insert("medical_consultations", payload)
-        consultation_fee = to_float(data.get("consultation_fee"), get_tariff_amount("consultation", "Consultation", 0))
+        consultation_fee = to_float(data.get("consultation_fee"), get_tariff_amount("consultation", "Consultation", 15.0))
         consultation_line = None
         if consultation_fee > 0:
             consultation_line = add_patient_account_line(patient_id, "consultation", "Consultation medicale", consultation_fee, "consultation", result.data[0].get("id"))
@@ -514,11 +517,11 @@ def register_workflow_routes(app, *, runtime):
         except Exception as e:
             print(f"Erreur libération box: {e}")
         
+        # La consultation est débitée une seule fois dans le compte patient.
+        # La facture imprimable est créée lors du règlement de ce compte.  Ne pas
+        # appeler facture_auto ici : cette fonction crée déjà une seconde ligne
+        # de compte et faisait donc doubler le montant de la consultation.
         consultation_invoice = None
-        if consultation_fee > 0:
-            consultation_invoice = facture_auto(patient_id, "CONSULT", 1, "consultation", result.data[0].get("id"))
-            if consultation_line and consultation_invoice and consultation_invoice.get("id"):
-                compatible_update("patient_account_lines", {"status": "invoiced", "invoice_id": consultation_invoice["id"], "updated_at": now_iso()}, "id", consultation_line.get("id"))
         
         add_audit("CREATE", "consultation", f"Consultation patient #{patient_id}", patient_id)
         invalidate_cache()

@@ -402,6 +402,9 @@ def linked_patient_ids_for_user() -> set:
             ("medical_consultations", "patient_id", "doctor_id"),
             (TABLES["appointments"], "patient_id", "doctor_id"),
             (TABLES["prescriptions"], "patient_id", "doctor_id"),
+            # Une hospitalisation est également un lien clinique explicite
+            # entre le patient et le médecin responsable.
+            ("hospitalizations", "patient_id", "doctor_id"),
             (TABLES["patients"], "id", "assigned_doctor_id"),
             (TABLES["patients"], "id", "created_by"),
         ]
@@ -569,15 +572,21 @@ def get_tariff_amount(category: str, label: str = "", default: float = 0.0) -> f
     try:
         rows = supabase.table(TABLES["tariffs"]).select("*").eq("category", category).eq("is_active", True).execute().data or []
     except Exception:
-        return to_float(default, 0.0)
-    if not rows:
-        return to_float(default, 0.0)
-    label_key = str(label or "").strip().lower()
-    if label_key:
-        for row in rows:
-            if str(row.get("label", "")).strip().lower() == label_key:
-                return to_float(row.get("amount"), default)
-    return to_float(rows[0].get("amount"), default)
+        rows = []
+    if rows:
+        label_key = str(label or "").strip().lower()
+        if label_key:
+            for row in rows:
+                if str(row.get("label", "")).strip().lower() == label_key:
+                    return to_float(row.get("amount"), default)
+        return to_float(rows[0].get("amount"), default)
+    # Fallback automatique sur le tarif interne
+    t = get_tarif_from_db(label or category)
+    if t and t.get("price_usd"):
+        return to_float(t["price_usd"], default)
+    if str(category).lower() in ("consultation", "consult"):
+        return 15.0
+    return to_float(default, 0.0)
 
 def parse_json_array(value: Any) -> list:
     if isinstance(value, list):

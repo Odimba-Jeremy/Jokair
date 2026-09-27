@@ -6,6 +6,75 @@ def register_billing_routes(app, *, runtime):
     globals().update(runtime)
     billing = Blueprint("billing", __name__)
 
+    def create_paid_account_invoice(patient_id, exchange_rate, payment_currency, amount_received, payment_key=None):
+        """Crée la facture imprimable des lignes du compte qui viennent d'être réglées."""
+        all_lines = supabase.table("patient_account_lines").select("*").eq(
+            "patient_id", patient_id
+        ).execute().data or []
+        pending = [l for l in all_lines if str(l.get("status", "")).lower() not in ("invoiced", "cancelled")]
+        if not pending:
+            pending = [l for l in all_lines if str(l.get("status", "")).lower() != "cancelled"]
+        if not pending:
+            return None
+
+        items, total_usd = [], 0.0
+        for line in pending:
+            amount_usd = round(to_float(line.get("amount_usd"), to_float(line.get("amount"), 0)), 2)
+            origin = str(line.get("currency_origin") or "USD").upper()
+            if origin == "CDF":
+                origin = "FC"
+            amount_origin = round(to_float(line.get("amount_origin"), amount_usd if origin == "USD" else amount_usd * exchange_rate), 2)
+            quantity = max(1, to_int(line.get("quantity"), 1))
+            unit_origin = round(to_float(line.get("unit_price_origin"), amount_origin / quantity), 2)
+            total_usd += amount_usd
+            items.append({
+                "account_line_id": line.get("id"),
+                "code": line.get("source") or line.get("category") or "PRESTATION",
+                # La clé technique d'idempotence reste dans le compte, jamais
+                # sur le document remis au patient.
+                "description": str(line.get("description", "Prestation")).split(" [idemp:", 1)[0],
+                "quantity": quantity,
+                "unit_price": unit_origin,
+                "amount": amount_origin,
+                "currency": origin,
+                "price_currency": origin,
+                "unit_price_usd": round(amount_usd / quantity, 2),
+                "amount_usd": amount_usd,
+                "amount_fc": round(amount_origin if origin == "FC" else amount_usd * exchange_rate, 2),
+            })
+
+        now = now_iso()
+        invoice = {
+            "invoice_number": f"FAC-{int(time.time())}-{secrets.token_hex(2).upper()}",
+            "patient_id": patient_id,
+            "amount": round(total_usd, 2),
+            "amount_usd": round(total_usd, 2),
+            "amount_cdf": round(total_usd * exchange_rate, 2),
+            "exchange_rate": exchange_rate,
+            "description": "Prestations réglées du compte patient" + (f" [payment:{payment_key}]" if payment_key else ""),
+            "status": "paid",
+            "paid_amount": round(total_usd, 2),
+            "paid_at": now,
+            "payment_currency": payment_currency,
+            "amount_received": amount_received,
+            "line_items": items,
+            "items": items,
+            "created_by": g.current_user["id"],
+            "created_by_name": g.current_user["name"],
+            "paid_by_user_id": g.current_user["id"],
+            "paid_by_name": g.current_user["name"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        result = compatible_insert(TABLES["billing"], invoice)
+        created = result.data[0] if result.data else invoice
+        if created.get("id"):
+            for line in pending:
+                compatible_update("patient_account_lines", {
+                    "status": "invoiced", "invoice_id": created["id"], "updated_at": now
+                }, "id", line.get("id"))
+        return created
+
     @billing.route("/api/tariffs", methods=["GET", "POST"])
     @roles_required("super_admin")
     def tariffs_compat():
@@ -729,10 +798,17 @@ def register_billing_routes(app, *, runtime):
                 existing_tx = supabase.table("patient_account_transactions").select("*").eq("patient_id", patient_id).ilike("description", f"%[idemp:{idempotency_key}]%").execute().data
                 if existing_tx:
                     tx = existing_tx[0]
+                    previous_invoice = None
+                    if idempotency_key:
+                        previous = supabase.table(TABLES["billing"]).select("*").eq("patient_id", patient_id).ilike(
+                            "description", f"%[payment:{idempotency_key}]%"
+                        ).execute().data or []
+                        previous_invoice = previous[0] if previous else None
                     return jsonify({
                         "message": "Paiement déjà enregistré (idempotence)",
                         "amount_paid_usd": abs(to_float(tx.get("amount"), 0)),
-                        "balance": to_float(tx.get("balance_after"), 0)
+                        "balance": to_float(tx.get("balance_after"), 0),
+                        "invoice": previous_invoice,
                     }), 200
             except Exception:
                 pass
@@ -801,20 +877,22 @@ def register_billing_routes(app, *, runtime):
                 "created_at": now_iso(), "updated_at": now_iso()
             })
 
-        # 7. Clôture complémentaire si solde intégralement payé
+        # 7. À solde nul, convertir les lignes du compte en une facture réglée
+        # visible dans l'onglet Factures et donc immédiatement imprimable.
+        paid_invoice = None
         if new_balance <= 0:
+            paid_invoice = create_paid_account_invoice(
+                patient_id, rate or 1, currency, raw_amount, idempotency_key
+            )
             unpaid_invoices = supabase.table(TABLES["billing"]).select("id,amount").eq("patient_id", patient_id).neq("status", "paid").execute().data or []
             for inv in unpaid_invoices:
+                if paid_invoice and inv.get("id") == paid_invoice.get("id"):
+                    continue
                 compatible_update(TABLES["billing"], {
                     "status": "paid", "paid_at": now_iso(), "paid_amount": inv.get("amount", 0),
                     "paid_by_user_id": g.current_user["id"], "paid_by_name": g.current_user["name"],
                     "updated_at": now_iso()
                 }, "id", inv["id"])
-
-            supabase.table("patient_account_lines").update({
-                "status": "invoiced",
-                "updated_at": now_iso()
-            }).eq("patient_id", patient_id).eq("status", "pending").execute()
 
         add_audit("PAYMENT", "patient_account", f"Compte #{patient_id} réglé : {raw_amount} {currency} ({amount_usd} $)", patient_id)
         invalidate_cache()
@@ -824,7 +902,8 @@ def register_billing_routes(app, *, runtime):
             "amount_received": raw_amount,
             "currency": currency,
             "rate": rate,
-            "balance": new_balance
+            "balance": new_balance,
+            "invoice": paid_invoice,
         }), 200
 
     # ==================== SUBSCRIBERS ====================
