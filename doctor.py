@@ -300,11 +300,12 @@ def register_doctor_routes(app, *, runtime):
             unit_price = to_float(data.get("unit_price") or data.get("price"), 0)
             pid = data.get("product_id")
             if unit_price <= 0 and pid:
-                stock_res = supabase.table(TABLES.get("pharmacy", "pharmacy")).select("selling_price, unit_price").eq("id", to_int(pid)).execute()
-                if not stock_res.data:
-                    stock_res = supabase.table("pharmacy_stock").select("selling_price, unit_price").eq("id", to_int(pid)).execute()
+                stock_res = supabase.table(TABLES.get("pharmacy", "pharmacy_items")).select("selling_price").eq("id", to_int(pid)).execute()
                 if stock_res.data:
-                    unit_price = to_float(stock_res.data[0].get("selling_price") or stock_res.data[0].get("unit_price"), 0)
+                    unit_price = to_float(stock_res.data[0].get("selling_price"), 0)
+                    product_currency = "CDF"
+            else:
+                product_currency = "CDF" if (unit_price > 100 or str(data.get("currency", "")).upper() in ["CDF", "FC"]) else "USD"
             
             if unit_price > 0:
                 total_amount = round(quantity * unit_price, 2)
@@ -316,7 +317,8 @@ def register_doctor_routes(app, *, runtime):
                     source="prescription",
                     source_id=created.get("id"),
                     quantity=quantity,
-                    unit_price=unit_price
+                    unit_price=unit_price,
+                    currency_origin=product_currency
                 )
         except Exception as bill_err:
             print(f"Erreur cotation compte patient pour prescription: {bill_err}")

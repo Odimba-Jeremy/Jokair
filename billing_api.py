@@ -54,6 +54,8 @@ def register_billing_routes(app, *, runtime):
     def get_exchange_rate_history():
         limit = to_int(request.args.get("limit"), 50)
         result = supabase.table("exchange_rates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute()
+        return jsonify(result.data or [])
+
     @billing.route("/api/billing/stats", methods=["GET"])
     @roles_required(*ROLES["staff"])
     def get_billing_stats():
@@ -83,9 +85,9 @@ def register_billing_routes(app, *, runtime):
         total_facture = 0.0
         for l in lines:
             if str(l.get("status", "")).lower() != "cancelled":
-                amt = to_float(l.get("amount"), 0)
-                amt_usd = round(amt / rate, 2) if amt > 1000 else amt
-                total_facture += amt_usd
+                # Patient account lines are canonical USD. Older FC lines are
+                # not reinterpreted here: migration/backfill must label them.
+                total_facture += to_float(l.get("amount"), 0)
                 
         total_encaisse = round(total_encaisse, 2)
         total_facture = round(total_facture, 2)
@@ -174,26 +176,36 @@ def register_billing_routes(app, *, runtime):
         if not items:
             return jsonify({"error": "Aucun article à facturer"}), 422
         normalized_items = []
-        total = 0.0
+        total_usd = 0.0
+        rate = get_current_rate() or 2250.0
         for item in items:
             qty = max(1, to_int(item.get("quantity"), 1))
             unit_price = max(0, to_float(item.get("unit_price") or item.get("price"), 0))
             amount = round(to_float(item.get("amount"), qty * unit_price), 2)
-            total += amount
+            currency = "USD" if str(item.get("currency") or item.get("price_currency") or "USD").upper() == "USD" else "FC"
+            amount_usd = amount if currency == "USD" else round(amount / rate, 2)
+            total_usd += amount_usd
             normalized_items.append({
                 "medication_id": item.get("medication_id"),
                 "code": item.get("code", ""),
                 "description": item.get("description", ""),
                 "quantity": qty,
                 "unit_price": unit_price,
-                "amount": amount
+                "amount": amount,
+                "currency": currency,
+                "price_currency": currency,
+                "amount_usd": amount_usd,
+                "amount_fc": amount if currency == "FC" else round(amount * rate, 2)
             })
-        if total <= 0:
+        if total_usd <= 0:
             return jsonify({"error": "Montant invalide"}), 422
         invoice = {
             "invoice_number": f"FAC-{int(time.time())}-{secrets.token_hex(2).upper()}",
             "patient_id": to_int(data.get("patient_id")),
-            "amount": round(total, 2),
+            "amount": round(total_usd, 2),
+            "amount_usd": round(total_usd, 2),
+            "amount_cdf": round(total_usd * rate, 2),
+            "exchange_rate": rate,
             "description": data.get("description", "Facture groupée"),
             "status": data.get("status", "unpaid"),
             "payment_type": data.get("payment_type"),
@@ -208,7 +220,7 @@ def register_billing_routes(app, *, runtime):
         invoice_id = result.data[0].get("id") if result.data else None
         
         if data.get("status") == "paid":
-            add_invoice_payment(invoice_id, to_int(data.get("patient_id")), round(total, 2), "Paiement immédiat")
+            add_invoice_payment(invoice_id, to_int(data.get("patient_id")), round(total_usd, 2), "Paiement immédiat")
         
         if data.get("source") == "pharmacy":
             for item in normalized_items:
@@ -222,7 +234,9 @@ def register_billing_routes(app, *, runtime):
                     "pharmacy_invoice",
                     None,
                     qty,
-                    item.get("unit_price")
+                    item.get("unit_price"),
+                    None,
+                    item.get("currency") or item.get("price_currency") or "FC"
                 )
                 if line and invoice_id:
                     compatible_update("patient_account_lines", {"status": "invoiced", "invoice_id": invoice_id, "updated_at": now_iso()}, "id", line.get("id"))
@@ -244,7 +258,7 @@ def register_billing_routes(app, *, runtime):
                         "created_at": now_iso()
                     })
         
-        add_audit("CREATE", "billing", f"Facture groupée: {round(total, 2)}", result.data[0]["id"])
+        add_audit("CREATE", "billing", f"Facture groupée: {round(total_usd, 2)} USD", result.data[0]["id"])
         invalidate_cache()
         return jsonify({"invoice": result.data[0]}), 201
 

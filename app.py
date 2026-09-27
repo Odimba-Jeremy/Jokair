@@ -620,7 +620,8 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
     if not patient_id or amount_origin <= 0:
         return None
 
-    # Conversion si la devise d'origine est le Franc Congolais (ex: produit pharmacie en FC)
+    # `amount` is always accompanied by its original currency.  The account's
+    # canonical amount is USD; FC is never guessed from its numeric value.
     currency_origin = str(currency_origin or "USD").upper()
     if currency_origin in ["CDF", "FC"]:
         rate = get_current_rate() or 2250.0
@@ -653,9 +654,15 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
         "patient_id": patient_id,
         "category": category,
         "description": stored_description,
+        # Compatibility: existing billing code reads `amount` as the account
+        # currency (USD).  The extra fields retain the source amount for UI,
+        # exports and auditing.
         "amount": amount_usd,
+        "amount_usd": amount_usd,
+        "amount_fc": round(amount_origin if currency_origin == "FC" else amount_usd * (get_current_rate() or 2250.0), 2),
         "quantity": max(1, to_int(quantity, 1)),
-        "unit_price": round(to_float(unit_price, amount_usd), 2),
+        "unit_price": round(amount_usd / max(1, to_int(quantity, 1)), 2),
+        "unit_price_origin": round(to_float(unit_price, amount_origin / max(1, to_int(quantity, 1))), 2),
         "source": source,
         "source_id": source_id,
         "idempotency_key": idempotency_key,
@@ -669,24 +676,58 @@ def add_patient_account_line(patient_id: int, category: str, description: str, a
     }
     try:
         result = compatible_insert("patient_account_lines", line)
-        # 🔄 Mise à jour automatique du solde dans patient_accounts
+        created_line = result.data[0] if result.data else None
+
+        # 🔄 Synchronisation patient_accounts + patient_account_transactions
         try:
+            creator_id = g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None
+            creator_name = g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme"
+
+            # 1. Cherche le compte du patient dans patient_accounts (eq patient_id)
             acc = supabase.table("patient_accounts").select("id,balance").eq("patient_id", patient_id).execute()
-            if acc.data:
-                new_bal = round(to_float(acc.data[0].get("balance", 0)) + amount, 2)
-                supabase.table("patient_accounts").update({"balance": new_bal, "updated_at": now_iso()}).eq("patient_id", patient_id).execute()
-            else:
-                creator_id = g.current_user.get("id") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else None
-                creator_name = g.current_user.get("name") if (has_request_context() and hasattr(g, "current_user") and isinstance(g.current_user, dict)) else "Systeme"
+
+            # 2. S'il n'existe pas, le crée : balance=0, status="active", created_by, created_by_name, created_at, updated_at
+            if not acc.data:
                 compatible_insert("patient_accounts", {
-                    "patient_id": patient_id, "balance": amount, "status": "active",
+                    "patient_id": patient_id,
+                    "balance": 0.0,
+                    "status": "active",
                     "created_by": creator_id,
                     "created_by_name": creator_name,
-                    "created_at": now_iso(), "updated_at": now_iso()
+                    "created_at": now_iso(),
+                    "updated_at": now_iso()
                 })
-        except Exception as bal_exc:
-            print(f"Erreur mise à jour solde compte #{patient_id}: {bal_exc}")
-        return result.data[0] if result.data else None
+                current_balance = 0.0
+            else:
+                current_balance = to_float(acc.data[0].get("balance", 0))
+
+            # 3. Ajoute amount au solde existant (round 2 décimales)
+            new_balance = round(current_balance + amount_usd, 2)
+
+            # 4. Update patient_accounts.balance et updated_at
+            supabase.table("patient_accounts").update({
+                "balance": new_balance,
+                "updated_at": now_iso()
+            }).eq("patient_id", patient_id).execute()
+
+            # 5. Insère dans patient_account_transactions : patient_id, amount, type="debit", description, balance_after, created_by, created_by_name, created_at
+            transaction = {
+                "patient_id": patient_id,
+                "amount": amount_usd,
+                "type": "debit",
+                "description": stored_description,
+                "balance_after": new_balance,
+                "created_by": creator_id,
+                "created_by_name": creator_name,
+                "created_at": now_iso()
+            }
+            compatible_insert("patient_account_transactions", transaction)
+
+        except Exception as sync_exc:
+            # 6. Log l'erreur, ne casse pas l'appel
+            print(f"Erreur synchro compte/transaction #{patient_id}: {sync_exc}")
+
+        return created_line
     except Exception as exc:
         print(f"Impossible d'ajouter la ligne compte patient: {exc}")
         return None
@@ -728,16 +769,33 @@ def get_current_rate():
     return None
 
 def get_tarif_from_db(code_tarif):
+    code_upper = str(code_tarif or "").strip().upper()
     try:
-        result = supabase.table(TABLES["tariffs"]).select("*").eq("code", code_tarif).eq("is_active", True).execute()
-        if result.data:
-            return result.data[0]
-        result = supabase.table(TABLES["tariffs"]).select("*").eq("category", code_tarif).eq("is_active", True).execute()
-        if result.data:
-            return result.data[0]
-        return None
+        # 1. Recherche dans tariff_grid
+        result = supabase.table(TABLES["tariffs"]).select("*").eq("is_active", True).execute()
+        rows = result.data or []
+        for r in rows:
+            r_label = str(r.get("label") or "").strip().upper()
+            r_cat = str(r.get("category") or "").strip().upper()
+            r_code = str(r.get("code") or "").strip().upper()
+            if code_upper in (r_code, r_label, r_cat):
+                return {
+                    "label": r.get("label", code_tarif),
+                    "category": r.get("category", "soins"),
+                    "price_usd": to_float(r.get("price_usd") or r.get("amount"), 0)
+                }
     except Exception:
-        return None
+        pass
+    
+    # 2. Fallback robuste sur le catalogue interne TARIFS
+    if code_upper in TARIFS:
+        t = TARIFS[code_upper]
+        return {
+            "label": t.get("label", code_tarif),
+            "category": t.get("category", "soins"),
+            "price_usd": to_float(t.get("price_usd"), 0)
+        }
+    return None
 
 def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
     tarif = get_tarif_from_db(code_tarif)
@@ -746,7 +804,8 @@ def facture_auto(patient_id, code_tarif, quantite=1, source="", source_id=None):
         return None
     
     taux = get_current_rate() or 2250.0
-    prix_usd = round(to_float(tarif.get("price_usd", 0)) * quantite, 2)
+    unit_p = to_float(tarif.get("price_usd") or tarif.get("amount"), 0)
+    prix_usd = round(unit_p * quantite, 2)
     prix_cdf = round(prix_usd * taux, 2)
     
     if prix_usd <= 0:

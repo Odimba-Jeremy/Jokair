@@ -30,8 +30,15 @@ def broadcast_event(event_type: str, payload: dict[str, Any] | None = None) -> d
 @events_bp.route("/api/events/stream", methods=["GET"])
 def event_stream():
     """Flux Server-Sent Events (SSE) avec ping régulier de maintien de connexion."""
-    def generate():
-        last_id = int(request.args.get("last_event_id", 0))
+    # Le contexte Flask n'existe plus lorsque Gunicorn commence à consommer le
+    # générateur. Lire les paramètres avant de créer le flux évite l'erreur
+    # "Working outside of request context" et les reconnexions en boucle.
+    try:
+        last_id_init = int(request.args.get("last_event_id", 0))
+    except (TypeError, ValueError):
+        last_id_init = 0
+
+    def generate(last_id):
         # Envoyer les événements manqués
         for ev in _EVENTS_BUFFER:
             if ev["id"] > last_id:
@@ -50,7 +57,7 @@ def event_stream():
             time.sleep(2)
 
     return Response(
-        generate(),
+        generate(last_id_init),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

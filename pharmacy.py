@@ -63,6 +63,8 @@ def register_pharmacy_routes(app, *, runtime):
             "unit": data.get("unit", "comprimé(s)"),
             "purchase_price": max(0, to_float(data.get("purchase_price"), 0)),
             "selling_price": max(0, to_float(data.get("selling_price"), 0)),
+            # Legacy products are FC. New products may explicitly be USD.
+            "price_currency": "USD" if str(data.get("price_currency") or data.get("currency") or "FC").upper() == "USD" else "FC",
             "threshold": max(0, to_int(data.get("threshold"), 10)),
             "expiry_date": optional_date(data.get("expiry_date")),
             "category": clean_cat,
@@ -92,7 +94,7 @@ def register_pharmacy_routes(app, *, runtime):
     @roles_required("super_admin", "pharmacie")
     def update_pharmacy_item(item_id: int):
         data = fast_json()
-        allowed = ["medication_name", "unit", "purchase_price", "selling_price", "threshold", "expiry_date", "category", "form", "dosage", "dosage_unit", "route", "consumable_type", "size"]
+        allowed = ["medication_name", "unit", "purchase_price", "selling_price", "price_currency", "threshold", "expiry_date", "category", "form", "dosage", "dosage_unit", "route", "consumable_type", "size"]
         updates = {k: v for k, v in data.items() if k in allowed and v is not None}
         if "expiry_date" in updates:
             updates["expiry_date"] = optional_date(updates["expiry_date"])
@@ -198,7 +200,9 @@ def register_pharmacy_routes(app, *, runtime):
                 "pharmacy_dispense",
                 item_id,
                 quantity,
-                unit_price
+                unit_price,
+                None,
+                item.get("price_currency") or item.get("currency") or "FC"
             )
 
             new_qty = item.get("quantity", 0) - quantity
@@ -296,7 +300,11 @@ def register_pharmacy_routes(app, *, runtime):
                 item.get("description", "Médicament"),
                 amount,
                 "pharmacy",
-                item.get("medication_id")
+                item.get("medication_id"),
+                to_int(item.get("quantity"), 1),
+                to_float(item.get("unit_price"), 0),
+                None,
+                item.get("currency") or item.get("price_currency") or "FC"
             )
 
         add_audit("CREATE", "pharmacy_account", f"Ajout au compte patient #{patient_id}: {total}", patient_id)
