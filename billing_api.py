@@ -72,8 +72,10 @@ def register_billing_routes(app, *, runtime):
         for tx in transactions:
             amt = to_float(tx.get("amount"), 0)
             if str(tx.get("type", "")).lower() == "credit" or amt < 0:
-                val = abs(amt)
-                val_usd = round(val / rate, 2) if val > 1000 else val
+                # Les transactions du compte patient sont stockées en USD
+                # canonique. Ne jamais déduire la devise depuis la taille du
+                # nombre : 1 500 USD ne doit pas être traité comme 1 500 FC.
+                val_usd = abs(amt)
                 total_encaisse += val_usd
                 
                 tx_date = str(tx.get("created_at") or "")
