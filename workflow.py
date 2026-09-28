@@ -372,15 +372,16 @@ def register_workflow_routes(app, *, runtime):
             box = box_check.data[0]
             if to_int(box.get("doctor_id")) != doctor_id:
                 return jsonify({"error": "Ce box n'est pas attribué au médecin sélectionné"}), 422
-            if box.get("status") != "free":
-                return jsonify({"error": "Ce box est déjà occupé"}), 422
-            supabase.table("medical_boxes").update({
-                "status": "occupied",
-                "patient_id": patient_id,
-                "patient_name": get_patient_map().get(patient_id, "Patient"),
-                "occupied_at": now_iso(),
-                "updated_at": now_iso()
-            }).eq("id", to_int(box_id)).execute()
+            # On permet le dispatch meme si le box est occupe — le patient sera
+            # en file d'attente dans la salle d'attente du medecin.
+            if box.get("status") == "free":
+                supabase.table("medical_boxes").update({
+                    "status": "occupied",
+                    "patient_id": patient_id,
+                    "patient_name": get_patient_map().get(patient_id, "Patient"),
+                    "occupied_at": now_iso(),
+                    "updated_at": now_iso()
+                }).eq("id", to_int(box_id)).execute()
         
         payload = {
             "patient_id": patient_id,

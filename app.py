@@ -21,6 +21,7 @@ from flask_caching import Cache
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from supabase import create_client, Client
 from werkzeug.security import generate_password_hash, check_password_hash
+import httpx
 
 # ==================== CACHE CONFIGURATION ====================
 REDIS_URL = os.getenv("REDIS_URL", "")
@@ -124,7 +125,61 @@ def optimize_response(response):
 if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY est requis")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# --- Supabase avec reconnexion automatique sur erreur HTTP/2 ---
+_supabase_holder = {"client": create_client(SUPABASE_URL, SUPABASE_KEY)}
+_RETRY_ERRORS = (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError, ConnectionError, OSError)
+
+def _recreate_supabase():
+    """Recree le client Supabase quand la connexion HTTP/2 se corrompt."""
+    print("\u26a0\ufe0f Reconnexion Supabase (httpx.ReadError detecte)...")
+    _supabase_holder["client"] = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_holder["client"]
+
+class _SupabaseProxy:
+    """Proxy transparent qui intercepte les erreurs httpx et recree le client."""
+    def __getattr__(self, name):
+        return getattr(_supabase_holder["client"], name)
+
+    def table(self, table_name):
+        return _ReplayBuilder(table_name, [])
+
+class _ReplayBuilder:
+    """Enregistre les operations chainees et peut les rejouer sur un nouveau client."""
+    def __init__(self, table_name, ops):
+        self._table_name = table_name
+        self._ops = list(ops)
+
+    def _build(self, client=None):
+        """Construit la query sur le client donne (ou le client courant)."""
+        c = client or _supabase_holder["client"]
+        q = c.table(self._table_name)
+        for method_name, args, kwargs in self._ops:
+            q = getattr(q, method_name)(*args, **kwargs)
+        return q
+
+    def __getattr__(self, name):
+        if name == "execute":
+            return self._execute
+        def chain(*args, **kwargs):
+            new_ops = self._ops + [(name, args, kwargs)]
+            return _ReplayBuilder(self._table_name, new_ops)
+        return chain
+
+    def _execute(self):
+        try:
+            return self._build().execute()
+        except _RETRY_ERRORS as e:
+            print(f"\u26a0\ufe0f Supabase {self._table_name} execute() erreur: {e}, retry...")
+            new_client = _recreate_supabase()
+            try:
+                return self._build(new_client).execute()
+            except _RETRY_ERRORS:
+                raise
+
+    def execute(self):
+        return self._execute()
+
+supabase: Client = _SupabaseProxy()
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 TABLES = {
