@@ -330,54 +330,277 @@ def register_laboratory_routes(app, *, runtime):
         invalidate_cache()
         return jsonify(result.data[0]), 201
 
-    # ==================== LABORATORY PARAMS ====================
-    LAB_PARAMS = {
-        "Hémogramme": [
-            {"name": "GB", "label": "Globules blancs", "unit": "G/L", "ref_min": 4.0, "ref_max": 10.0, "decimal": 1},
-            {"name": "GR", "label": "Globules rouges", "unit": "T/L", "ref_min": 4.2, "ref_max": 5.8, "decimal": 2},
-            {"name": "Hb", "label": "Hémoglobine", "unit": "g/dL", "ref_min": 12.0, "ref_max": 16.0, "decimal": 1},
-            {"name": "Ht", "label": "Hématocrite", "unit": "%", "ref_min": 37, "ref_max": 47, "decimal": 0},
-            {"name": "VGM", "label": "VGM", "unit": "fL", "ref_min": 80, "ref_max": 96, "decimal": 0},
-            {"name": "TCMH", "label": "TCMH", "unit": "pg", "ref_min": 27, "ref_max": 32, "decimal": 1},
-            {"name": "CCMH", "label": "CCMH", "unit": "g/dL", "ref_min": 32, "ref_max": 36, "decimal": 1},
-            {"name": "Plaquettes", "label": "Plaquettes", "unit": "G/L", "ref_min": 150, "ref_max": 400, "decimal": 0}
-        ],
-        "Bilan hépatique": [
-            {"name": "ALAT", "label": "ALAT", "unit": "U/L", "ref_min": 5, "ref_max": 45, "decimal": 0},
-            {"name": "ASAT", "label": "ASAT", "unit": "U/L", "ref_min": 5, "ref_max": 40, "decimal": 0},
-            {"name": "GGT", "label": "Gamma-GT", "unit": "U/L", "ref_min": 5, "ref_max": 50, "decimal": 0},
-            {"name": "PAL", "label": "Phosphatases alcalines", "unit": "U/L", "ref_min": 30, "ref_max": 120, "decimal": 0},
-            {"name": "Bilirubine_T", "label": "Bilirubine totale", "unit": "mg/dL", "ref_min": 0.2, "ref_max": 1.2, "decimal": 1},
-            {"name": "Bilirubine_D", "label": "Bilirubine directe", "unit": "mg/dL", "ref_min": 0, "ref_max": 0.3, "decimal": 1}
-        ],
-        "Bilan rénal": [
-            {"name": "Uree", "label": "Urée", "unit": "g/L", "ref_min": 0.2, "ref_max": 0.5, "decimal": 2},
-            {"name": "Creatinine", "label": "Créatinine", "unit": "mg/L", "ref_min": 6, "ref_max": 13, "decimal": 1},
-            {"name": "Acide_urique", "label": "Acide urique", "unit": "mg/L", "ref_min": 25, "ref_max": 80, "decimal": 1}
-        ],
-        "Bilan lipidique": [
-            {"name": "Cholest_total", "label": "Cholestérol total", "unit": "g/L", "ref_min": 1.4, "ref_max": 2.5, "decimal": 2},
-            {"name": "Triglycerides", "label": "Triglycérides", "unit": "g/L", "ref_min": 0.4, "ref_max": 1.8, "decimal": 2},
-            {"name": "HDL", "label": "HDL-Cholestérol", "unit": "g/L", "ref_min": 0.4, "ref_max": 0.7, "decimal": 2},
-            {"name": "LDL", "label": "LDL-Cholestérol", "unit": "g/L", "ref_min": 0.6, "ref_max": 1.6, "decimal": 2}
-        ],
-        "Analyse d'urine": [
-            {"name": "pH", "label": "pH", "unit": "", "ref_min": 4.5, "ref_max": 8.0, "decimal": 1},
-            {"name": "Densite", "label": "Densité", "unit": "", "ref_min": 1.005, "ref_max": 1.030, "decimal": 3},
-            {"name": "Proteines", "label": "Protéines", "unit": "g/L", "ref_min": 0, "ref_max": 0.15, "decimal": 2},
-            {"name": "Glucose", "label": "Glucose", "unit": "mmol/L", "ref_min": 0, "ref_max": 0.8, "decimal": 1},
-            {"name": "Cetones", "label": "Cétones", "unit": "", "ref_min": None, "ref_max": None, "decimal": 0},
-            {"name": "Nitrites", "label": "Nitrites", "unit": "", "ref_min": None, "ref_max": None, "decimal": 0},
-            {"name": "Leucocytes", "label": "Leucocytes", "unit": "/µL", "ref_min": 0, "ref_max": 5, "decimal": 0},
-            {"name": "Hematies", "label": "Hématies", "unit": "/µL", "ref_min": 0, "ref_max": 3, "decimal": 0}
-        ]
+    # ==================== CATALOGUE LABORATOIRE 5 DÉPARTEMENTS ====================
+    LAB_CATALOG = {
+        "hematologie": {
+            "label": "1. Hématologie",
+            "exams": {
+                "VS": {
+                    "code": "VS",
+                    "name": "VS",
+                    "full_name": "VS (Vitesse de sédimentation)",
+                    "aliases": ["vs", "vitesse de sedimentation", "vitesse de sédimentation"],
+                    "sample": "Sang total citraté",
+                    "params": [
+                        {"code": "vs_1h", "name": "1ère heure", "unit": "mm", "ref_min": 0, "ref_max": 15, "ref_text": "< 15 mm (H) / < 20 mm (F)", "type": "number"},
+                        {"code": "vs_2h", "name": "2ème heure", "unit": "mm", "ref_min": 0, "ref_max": 30, "ref_text": "< 25 mm (H) / < 30 mm (F)", "type": "number"}
+                    ]
+                },
+                "NFS": {
+                    "code": "NFS",
+                    "name": "NFS",
+                    "full_name": "NFS (Numération Formule Sanguine)",
+                    "aliases": ["nfs", "hemogramme", "hémogramme", "numeration formule sanguine", "numération formule sanguine", "nfs / hemogramme"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "gb", "name": "GB (Globules blancs)", "unit": "G/L", "ref_min": 4.0, "ref_max": 10.0, "ref_text": "4.0 - 10.0 G/L", "type": "number", "decimal": 1},
+                        {"code": "hb", "name": "Hb (Hémoglobine)", "unit": "g/dL", "ref_min": 12.0, "ref_max": 17.5, "ref_text": "12.0 - 16.0 (F) / 13.0 - 17.5 (H) g/dL", "type": "number", "decimal": 1},
+                        {"code": "fl", "name": "Formule leucocytaire", "unit": "%", "ref_text": "Neutro 40-75%, Lympho 20-45%, Mono 2-10%, Eosino 1-5%, Baso 0-1%", "type": "text"},
+                        {"code": "hct", "name": "HCT (Hématocrite)", "unit": "%", "ref_min": 36.0, "ref_max": 52.0, "ref_text": "36 - 46% (F) / 40 - 52% (H)", "type": "number", "decimal": 1},
+                        {"code": "vgm", "name": "VGM", "unit": "fL", "ref_min": 80.0, "ref_max": 100.0, "ref_text": "80 - 100 fL", "type": "number", "decimal": 1},
+                        {"code": "tcmh", "name": "TCMH", "unit": "pg", "ref_min": 27.0, "ref_max": 32.0, "ref_text": "27 - 32 pg", "type": "number", "decimal": 1},
+                        {"code": "ccmh", "name": "CCMH", "unit": "g/dL", "ref_min": 32.0, "ref_max": 36.0, "ref_text": "32 - 36 g/dL", "type": "number", "decimal": 1},
+                        {"code": "idr_cv", "name": "IDR-CV", "unit": "%", "ref_min": 11.5, "ref_max": 14.5, "ref_text": "11.5 - 14.5 %", "type": "number", "decimal": 1},
+                        {"code": "plt", "name": "PLT (Plaquettes)", "unit": "G/L", "ref_min": 150.0, "ref_max": 450.0, "ref_text": "150 - 450 G/L", "type": "number", "decimal": 0},
+                        {"code": "vpm", "name": "VPM", "unit": "fL", "ref_min": 7.5, "ref_max": 11.5, "ref_text": "7.5 - 11.5 fL", "type": "number", "decimal": 1},
+                        {"code": "idp", "name": "IDP", "unit": "%", "ref_min": 10.0, "ref_max": 18.0, "ref_text": "10 - 18 %", "type": "number", "decimal": 1},
+                        {"code": "pct", "name": "PCT (Plaquettocrite)", "unit": "%", "ref_min": 0.15, "ref_max": 0.40, "ref_text": "0.15 - 0.40 %", "type": "number", "decimal": 2}
+                    ]
+                },
+                "TGP": {
+                    "code": "TGP",
+                    "name": "P-TGP",
+                    "full_name": "P-TGP (Transaminases ALAT)",
+                    "aliases": ["p-tgp", "tgp", "alat", "alt", "transaminases"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "tgp", "name": "P-TGP / ALAT", "unit": "U/L", "ref_min": 0, "ref_max": 45, "ref_text": "< 45 U/L (H) / < 35 U/L (F)", "type": "number", "decimal": 0}
+                    ]
+                }
+            }
+        },
+        "parasitologie": {
+            "label": "2. Parasitologie",
+            "exams": {
+                "UC": {
+                    "code": "UC",
+                    "name": "UC",
+                    "full_name": "UC (Uroculture)",
+                    "aliases": ["uc", "uroculture", "examen cytobacteriologique des urines", "ecbu"],
+                    "sample": "Urine",
+                    "params": [
+                        {"code": "aspect", "name": "Aspect de l'urine", "unit": "", "ref_text": "Limpide", "type": "select", "options": ["Limpide", "Trouble", "Légèrement trouble", "Hématique"]},
+                        {"code": "leucocytes", "name": "Leucocyturie", "unit": "/champ", "ref_text": "< 5 / champ (< 10 000/mL)", "type": "text"},
+                        {"code": "hematies", "name": "Hématurie", "unit": "/champ", "ref_text": "< 3 / champ (< 5 000/mL)", "type": "text"},
+                        {"code": "germes", "name": "Culture & Germe", "unit": "", "ref_text": "Stérile (Absence de germes pathogènes)", "type": "text"},
+                        {"code": "antibiogramme", "name": "Antibiogramme", "unit": "", "ref_text": "Sensibilité", "type": "textarea"}
+                    ]
+                },
+                "SELLE": {
+                    "code": "SELLE",
+                    "name": "Selle à frais",
+                    "full_name": "Selle à frais",
+                    "aliases": ["selle à frais", "selle a frais", "selle", "examen parasitologique des selles"],
+                    "sample": "Selles fraîches",
+                    "params": [
+                        {"code": "aspect", "name": "Consistance / Aspect", "unit": "", "ref_text": "Moulée", "type": "select", "options": ["Moulée", "Pâteuse", "Liquide", "Glaireuse", "Hémorragique"]},
+                        {"code": "parasites", "name": "Kystes & Parasites", "unit": "", "ref_text": "Absence de kystes ni trophozoïtes", "type": "text"},
+                        {"code": "oeufs", "name": "Œufs d'helminthes", "unit": "", "ref_text": "Absence d'œufs", "type": "text"},
+                        {"code": "levures", "name": "Levures / Mycètes", "unit": "", "ref_text": "Absence", "type": "text"}
+                    ]
+                },
+                "GE": {
+                    "code": "GE",
+                    "name": "GE",
+                    "full_name": "GE (Goutte épaisse / Frottis)",
+                    "aliases": ["ge", "goutte epaisse", "goutte épaisse", "frottis sanguin", "recherche hematozoaires"],
+                    "sample": "Sang total",
+                    "params": [
+                        {"code": "resultat", "name": "Recherche d'hématozoaires", "unit": "", "ref_text": "Négatif (Absence de trophozoïtes)", "type": "select", "options": ["Négatif", "Positif"]},
+                        {"code": "densite", "name": "Densité parasitaire", "unit": "trophozoïtes/µL", "ref_text": "0 / µL", "type": "text"},
+                        {"code": "espece", "name": "Espèce plasmodiale", "unit": "", "ref_text": "—", "type": "select", "options": ["—", "Plasmodium falciparum", "Plasmodium vivax", "Plasmodium malariae", "Plasmodium ovale", "Infection mixte"]}
+                    ]
+                }
+            }
+        },
+        "serologie": {
+            "label": "3. Sérologie",
+            "exams": {
+                "HIV": {
+                    "code": "HIV",
+                    "name": "HIV",
+                    "full_name": "HIV (Test rapide VIH 1/2)",
+                    "aliases": ["hiv", "vih", "serologie vih", "sérologie vih", "hiv 1/2"],
+                    "sample": "Sérum / Sang total",
+                    "params": [
+                        {"code": "resultat", "name": "Sérologie VIH 1/2", "unit": "", "ref_text": "Non réactif", "type": "select", "options": ["Non réactif", "Réactif", "Indéterminé"]}
+                    ]
+                },
+                "HBS": {
+                    "code": "HBS",
+                    "name": "HBS",
+                    "full_name": "HBS (Ag HBs - Hépatite B)",
+                    "aliases": ["hbs", "ag hbs", "hepatite b", "hépatite b"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "resultat", "name": "Antigène HBs", "unit": "", "ref_text": "Négatif (Non réactif)", "type": "select", "options": ["Négatif", "Positif"]}
+                    ]
+                },
+                "HCV": {
+                    "code": "HCV",
+                    "name": "HCV",
+                    "full_name": "HCV (Ac anti-VHC - Hépatite C)",
+                    "aliases": ["hcv", "vhc", "ac anti-vhc", "hepatite c", "hépatite c"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "resultat", "name": "Anticorps anti-VHC", "unit": "", "ref_text": "Négatif (Non réactif)", "type": "select", "options": ["Négatif", "Positif"]}
+                    ]
+                },
+                "SYPHILIS": {
+                    "code": "Syphilis",
+                    "name": "Syphilis",
+                    "full_name": "Syphilis (RPR / VDRL / TPHA)",
+                    "aliases": ["syphilis", "rpr", "vdrl", "tpha", "bw"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "resultat", "name": "Sérologie syphilitique", "unit": "", "ref_text": "Négatif (Non réactif)", "type": "select", "options": ["Négatif", "Positif"]},
+                        {"code": "titre", "name": "Titre (si réactif)", "unit": "", "ref_text": "< 1/2", "type": "text"}
+                    ]
+                },
+                "HCG": {
+                    "code": "HCG",
+                    "name": "HCG",
+                    "full_name": "HCG (Test de grossesse)",
+                    "aliases": ["hcg", "test de grossesse", "beta-hcg", "b-hcg", "grossesse"],
+                    "sample": "Urine / Sérum",
+                    "params": [
+                        {"code": "resultat", "name": "Recherche b-HCG", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Positif"]}
+                    ]
+                }
+            }
+        },
+        "immunologie": {
+            "label": "4. Immunologie",
+            "exams": {
+                "WIDAL": {
+                    "code": "Widal",
+                    "name": "Widal",
+                    "full_name": "Widal (Sérodiagnostic de Widal & Félix)",
+                    "aliases": ["widal", "sero-diagnostic de widal", "fievre typhoide"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "to", "name": "Antigène O (S. typhi TO)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]},
+                        {"code": "th", "name": "Antigène H (S. typhi TH)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]},
+                        {"code": "ao", "name": "Antigène AO (S. paratyphi A)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]},
+                        {"code": "ah", "name": "Antigène AH (S. paratyphi A)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]},
+                        {"code": "bo", "name": "Antigène BO (S. paratyphi B)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]},
+                        {"code": "bh", "name": "Antigène BH (S. paratyphi B)", "unit": "", "ref_text": "< 1/100 (Négatif)", "type": "select", "options": ["Négatif (< 1/100)", "1/100", "1/200", "1/400", "1/800 et +"]}
+                    ]
+                },
+                "GS": {
+                    "code": "GS",
+                    "name": "GS",
+                    "full_name": "GS (Groupe Sanguin & Rhésus)",
+                    "aliases": ["gs", "groupe sanguin", "groupage", "abo-rh", "groupage sanguin abo et rhesus"],
+                    "sample": "Sang total",
+                    "params": [
+                        {"code": "groupe", "name": "Groupe ABO", "unit": "", "ref_text": "A, B, AB ou O", "type": "select", "options": ["A", "B", "AB", "O"]},
+                        {"code": "rhesus", "name": "Facteur Rhésus (Rh)", "unit": "", "ref_text": "Positif (+) ou Négatif (-)", "type": "select", "options": ["Positif (+)", "Négatif (-)"]}
+                    ]
+                },
+                "COMPAT": {
+                    "code": "COMPAT",
+                    "name": "Test de compatibilité",
+                    "full_name": "Test de compatibilité (Crossmatch)",
+                    "aliases": ["test de compatibilité", "test de compatibilite", "compatibilite", "crossmatch"],
+                    "sample": "Sérum receveur + Culot donneur",
+                    "params": [
+                        {"code": "resultat", "name": "Épreuve de compatibilité majeure", "unit": "", "ref_text": "Compatible (Absence d'agglutination)", "type": "select", "options": ["Compatible", "Incompatible"]}
+                    ]
+                }
+            }
+        },
+        "biochimie": {
+            "label": "5. Biochimie",
+            "exams": {
+                "BU": {
+                    "code": "BU",
+                    "name": "Bandelette urinaire",
+                    "full_name": "Bandelette urinaire (10 paramètres)",
+                    "aliases": ["bu", "bandelette urinaire", "bandelette", "analyse d'urine", "chimie des urines"],
+                    "sample": "Urine fraîche",
+                    "params": [
+                        {"code": "leucocytes", "name": "Leucocytes", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Traces", "+", "++", "+++"]},
+                        {"code": "nitrites", "name": "Nitrites", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Positif"]},
+                        {"code": "urobilinogene", "name": "Urobilinogène", "unit": "", "ref_text": "Normal (0.2 mg/dL)", "type": "select", "options": ["Normal", "Traces", "+", "++", "+++"]},
+                        {"code": "proteines", "name": "Protéines", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Traces", "+", "++", "+++"]},
+                        {"code": "ph", "name": "pH", "unit": "", "ref_min": 5.0, "ref_max": 8.5, "ref_text": "5.0 - 8.0", "type": "number", "decimal": 1},
+                        {"code": "sang", "name": "Blood / Sang", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Traces", "+", "++", "+++"]},
+                        {"code": "densite", "name": "Specific Gravity / Densité", "unit": "", "ref_min": 1.005, "ref_max": 1.030, "ref_text": "1.005 - 1.030", "type": "number", "decimal": 3},
+                        {"code": "cetones", "name": "Ketone / Cétones", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Traces", "+", "++", "+++"]},
+                        {"code": "bilirubine", "name": "Bilirubine", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "+", "++", "+++"]},
+                        {"code": "glucose", "name": "Glucose", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Traces", "+", "++", "+++"]}
+                    ]
+                }
+            }
+        }
     }
 
-    @laboratory.route("/api/laboratory/params/<string:test_type>", methods=["GET"])
-    @roles_required("super_admin", "laboratoire")
-    def get_lab_params(test_type: str):
-        return jsonify(LAB_PARAMS.get(test_type, []))
+    # Custom lab references store in memory / persistent table
+    _CUSTOM_LAB_REFS = {}
 
-    # ==================== CARE LOGS ====================
+    def find_exam_spec(test_type_str):
+        """Trouve la spécification de l'examen dans le catalogue par code ou alias."""
+        clean = str(test_type_str or "").strip().lower()
+        if not clean:
+            return None
+        for dept_key, dept in LAB_CATALOG.items():
+            for exam_key, exam in dept["exams"].items():
+                if clean == exam["code"].lower() or clean == exam["name"].lower() or clean == exam["full_name"].lower():
+                    return exam
+                for alias in exam.get("aliases", []):
+                    if clean == alias.lower() or alias.lower() in clean or clean in alias.lower():
+                        return exam
+        return None
+
+    @laboratory.route("/api/laboratory/catalog", methods=["GET"])
+    @roles_required(*ROLES["staff"])
+    def get_lab_catalog():
+        """Retourne le catalogue officiel des 5 départements d'analyses de laboratoire."""
+        return jsonify(LAB_CATALOG)
+
+    @laboratory.route("/api/laboratory/params/<path:test_type>", methods=["GET"])
+    @roles_required("super_admin", "laboratoire", "docteur", "infirmier")
+    def get_lab_params_v2(test_type: str):
+        """Retourne les paramètres structurés et références actives d'un examen."""
+        exam = find_exam_spec(test_type)
+        if exam:
+            # Injecter les éventuelles références personnalisées du laboratoire
+            params = []
+            for p in exam["params"]:
+                p_copy = dict(p)
+                custom_key = f"{exam['code']}:{p['code']}"
+                if custom_key in _CUSTOM_LAB_REFS:
+                    p_copy.update(_CUSTOM_LAB_REFS[custom_key])
+                params.append(p_copy)
+            return jsonify({
+                "exam": exam["name"],
+                "full_name": exam["full_name"],
+                "sample": exam["sample"],
+                "params": params
+            })
+        return jsonify({"exam": test_type, "full_name": test_type, "sample": "Biologique", "params": []})
+
+    @laboratory.route("/api/laboratory/references", methods=["GET", "PUT"])
+    @roles_required("super_admin", "laboratoire")
+    def manage_lab_references():
+        """Consulter ou modifier les valeurs de référence personnalisées du laboratoire."""
+        if request.method == "GET":
+            return jsonify(_CUSTOM_LAB_REFS)
+        data = fast_json()
+        if isinstance(data, dict):
+            _CUSTOM_LAB_REFS.update(data)
+            return jsonify({"status": "success", "references": _CUSTOM_LAB_REFS})
+        return jsonify({"error": "Format invalide"}), 422
 
     app.register_blueprint(laboratory)

@@ -131,7 +131,7 @@ _RETRY_ERRORS = (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError,
 
 def _recreate_supabase():
     """Recree le client Supabase quand la connexion HTTP/2 se corrompt."""
-    print("\u26a0\ufe0f Reconnexion Supabase (httpx.ReadError detecte)...")
+    print("[WARN] Reconnexion Supabase (httpx.ReadError detecte)...")
     _supabase_holder["client"] = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase_holder["client"]
 
@@ -169,7 +169,7 @@ class _ReplayBuilder:
         try:
             return self._build().execute()
         except _RETRY_ERRORS as e:
-            print(f"\u26a0\ufe0f Supabase {self._table_name} execute() erreur: {e}, retry...")
+            print(f"[WARN] Supabase {self._table_name} execute() erreur: {e}, retry...")
             new_client = _recreate_supabase()
             try:
                 return self._build(new_client).execute()
@@ -237,32 +237,22 @@ TARIFS = {
 }
 # Statuts autorisés pour la file d'attente
 ALLOWED_STATUSES = {"en attente", "SV pris", "dispatché"}
-# Rooms definition (added)
-ROOMS = {
-    "A1": {"service": "maternite", "beds": 6, "type": "standard", "price_usd": 15, "label": "Chambre A1"},
-    "A2": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A2"},
-    "A3": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A3"},
-    "A4": {"service": "maternite", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre A4"},
-    "B1": {"service": "general", "beds": 6, "type": "standard", "price_usd": 15, "label": "Chambre B1"},
-    "B2": {"service": "general", "beds": 2, "type": "standard", "price_usd": 20, "label": "Chambre B2"},
-    "B3": {"service": "general", "beds": 3, "type": "standard", "price_usd": 20, "label": "Chambre B3"},
-    "B4": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B4"},
-    "B5": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B5"},
-    "B6": {"service": "general", "beds": 1, "type": "standard", "price_usd": 25, "label": "Chambre B6"}
-}
-
-def hardcoded_hospitalization_rooms() -> list[dict]:
-    """Catalogue fixe, avec occupation calculée depuis les admissions actives."""
+def hospitalization_rooms_from_db() -> list[dict]:
+    """Chambres configurées en base, avec occupation calculée en temps réel."""
+    try:
+        definitions = supabase.table("hospital_rooms").select("*").eq("is_active", True).order("room_number").execute().data or []
+    except Exception:
+        return []
     try:
         admissions = supabase.table("hospitalizations").select("room_id,bed_id,bed,status").in_("status", ["admitted", "hospitalized"]).execute().data or []
     except Exception:
         admissions = []
     rooms = []
-    for static_id, (room_number, definition) in enumerate(ROOMS.items(), start=1):
-        total_beds = max(1, to_int(definition.get("beds"), 1))
-        occupied_bed_ids = {str(row.get("bed_id") or row.get("bed")) for row in admissions if str(row.get("room_id")) == str(static_id)}
+    for definition in definitions:
+        total_beds = max(1, to_int(definition.get("total_beds"), 1))
+        occupied_bed_ids = {str(row.get("bed_id") or row.get("bed")) for row in admissions if str(row.get("room_id")) == str(definition.get("id"))}
         occupied = len(occupied_bed_ids)
-        rooms.append({"id": static_id, "room_number": room_number, "label": definition.get("label", f"Chambre {room_number}"), "service": definition.get("service", "general"), "type": definition.get("type", "standard"), "daily_rate": definition.get("price_usd", 0), "total_beds": total_beds, "occupied_beds": occupied, "available_beds": max(0, total_beds - occupied), "occupied_bed_ids": sorted(occupied_bed_ids), "status": "available" if occupied < total_beds else "occupied"})
+        rooms.append({**definition, "label": definition.get("label") or f"Chambre {definition.get('room_number')}", "daily_rate": to_float(definition.get("daily_rate"), 0), "total_beds": total_beds, "occupied_beds": occupied, "available_beds": max(0, total_beds - occupied), "occupied_bed_ids": sorted(occupied_bed_ids), "status": "available" if occupied < total_beds else "occupied"})
     return rooms
 def token_required(f):
     @wraps(f)
@@ -285,8 +275,7 @@ def roles_required(*allowed_roles):
 @roles_required(*ROLES["staff"])
 @cached(timeout=120)
 def get_rooms():
-    """Retourne le dictionnaire des chambres hospitalières."""
-    return jsonify(list(ROOMS.values()))
+    return jsonify(hospitalization_rooms_from_db())
 
 @app.route("/api/rooms/<room_id>/beds", methods=["GET"])
 @token_required
@@ -294,11 +283,12 @@ def get_rooms():
 def get_room_beds(room_id: str):
     """Retourne la liste des lits pour la chambre donnée.
     Chaque lit est représenté par un dict avec un id et un statut d'occupation (toujours False ici)."""
-    room = ROOMS.get(room_id)
+    rooms = hospitalization_rooms_from_db()
+    room = next((item for item in rooms if str(item.get("id")) == str(room_id) or str(item.get("room_number")) == str(room_id)), None)
     if not room:
         return jsonify({"error": "Room not found"}), 404
-    bed_count = room.get("beds", 0)
-    beds = [{"id": i, "occupied": False} for i in range(1, bed_count + 1)]
+    occupied = set(room.get("occupied_bed_ids") or [])
+    beds = [{"id": i, "occupied": str(i) in occupied} for i in range(1, to_int(room.get("total_beds"), 1) + 1)]
     return jsonify(beds)
 
 # ==================== UTILITAIRES ====================

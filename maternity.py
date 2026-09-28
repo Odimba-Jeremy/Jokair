@@ -9,6 +9,17 @@ def register_maternity_routes(app, *, runtime):
     globals().update(runtime)
     maternity = Blueprint("maternity", __name__)
 
+    NEWBORN_VACCINES = (("BCG", "BCG"), ("VPO0", "VPO 0"), ("HEPB0", "Hépatite B — naissance"))
+
+    def newborn_vaccine_plan(baby_patient_id):
+        """Calendrier fixe, enrichi uniquement des doses effectivement réalisées."""
+        try:
+            rows = supabase.table("newborn_vaccinations").select("*").eq("baby_patient_id", baby_patient_id).execute().data or []
+        except Exception:
+            rows = []
+        done = {str(row.get("vaccine_code")): row for row in rows}
+        return [{"code": code, "name": name, "status": "completed" if code in done else "planned", "record": done.get(code)} for code, name in NEWBORN_VACCINES]
+
     def pregnancy_timeline(last_menstrual_period):
         """Retourne une DDR normalisée et les valeurs obstétricales calculées."""
         try:
@@ -123,8 +134,15 @@ def register_maternity_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "infirmier")
     def update_pregnancy(pregnancy_id: int):
         data = fast_json()
+        existing = supabase.table("pregnancies").select("id,status").eq("id", pregnancy_id).execute().data or []
+        if not existing:
+            return jsonify({"error": "Grossesse introuvable"}), 404
+        if existing[0].get("status") == "completed":
+            return jsonify({"error": "Cette grossesse est terminée et définitivement verrouillée"}), 409
         allowed = ["last_menstrual_period", "expected_delivery_date", "blood_type", "risk_level", "medical_history", "status", "notes"]
         updates = {key: value for key, value in data.items() if key in allowed and value is not None}
+        if updates.get("status") and updates["status"] != "completed":
+            return jsonify({"error": "Une grossesse ne peut être clôturée que par l'enregistrement d'une naissance"}), 422
         if "last_menstrual_period" in updates:
             timeline = pregnancy_timeline(updates["last_menstrual_period"])
             if not timeline:
@@ -187,9 +205,11 @@ def register_maternity_routes(app, *, runtime):
         if visit_num not in CPN_PERIODS:
             return jsonify({"error": "Numéro de CPN invalide"}), 422
         pregnancy_id = to_int(data.get("pregnancy_id"))
-        pregnancy_rows = supabase.table("pregnancies").select("patient_id,last_menstrual_period").eq("id", pregnancy_id).execute().data or []
+        pregnancy_rows = supabase.table("pregnancies").select("patient_id,last_menstrual_period,status").eq("id", pregnancy_id).execute().data or []
         if not pregnancy_rows or to_int(pregnancy_rows[0].get("patient_id")) != patient_id:
             return jsonify({"error": "Grossesse introuvable pour cette patiente"}), 422
+        if pregnancy_rows[0].get("status") != "active":
+            return jsonify({"error": "Cette grossesse est terminée : aucun suivi ne peut être ajouté"}), 409
         timeline = pregnancy_timeline(pregnancy_rows[0].get("last_menstrual_period"))
         if not timeline:
             return jsonify({"error": "DDR invalide : CPN impossible à calculer"}), 422
@@ -298,26 +318,42 @@ def register_maternity_routes(app, *, runtime):
     @roles_required("super_admin", "docteur", "infirmier")
     def create_delivery():
         data = fast_json()
-        if not data.get("patient_id") or not data.get("delivery_date"):
-            return jsonify({"error": "Patient et date requis"}), 422
+        if not data.get("patient_id"):
+            return jsonify({"error": "Patiente requise"}), 422
         
         patient_id = to_int(data.get("patient_id"))
         pregnancy_id = data.get("pregnancy_id")
         delivery_type = data.get("delivery_type", "vaginal")
         
+        pregnancy = None
         if pregnancy_id:
-            existing_del = supabase.table("deliveries").select("id").eq("pregnancy_id", to_int(pregnancy_id)).execute().data or []
+            pregnancy_id = to_int(pregnancy_id)
+            existing_del = supabase.table("deliveries").select("id").eq("pregnancy_id", pregnancy_id).execute().data or []
             if existing_del:
                 return jsonify({"error": "L'accouchement a déjà été enregistré pour cette grossesse (#" + str(existing_del[0]['id']) + ")"}), 409
-            supabase.table("pregnancies").update({"status": "completed", "updated_at": now_iso()}).eq("id", pregnancy_id).execute()
+            pregnancies = supabase.table("pregnancies").select("id,patient_id,status").eq("id", pregnancy_id).execute().data or []
+            if not pregnancies or to_int(pregnancies[0].get("patient_id")) != patient_id:
+                return jsonify({"error": "Grossesse introuvable pour cette patiente"}), 422
+            if pregnancies[0].get("status") != "active":
+                return jsonify({"error": "Cette grossesse est déjà terminée"}), 409
+            pregnancy = pregnancies[0]
+
+        mothers = supabase.table(TABLES["patients"]).select("id,full_name,assigned_doctor_id").eq("id", patient_id).execute().data or []
+        if not mothers:
+            return jsonify({"error": "Patiente introuvable"}), 404
+        mother = mothers[0]
+        # Date et heure de naissance : saisies par le serveur au moment exact de la validation.
+        birth_at = now_iso()
+        birth_date = birth_at[:10]
         
         delivery = {
             "patient_id": patient_id,
             "pregnancy_id": pregnancy_id,
-            "delivery_date": data.get("delivery_date"),
+            "delivery_date": birth_date,
+            "delivery_time": birth_at,
             "delivery_type": delivery_type,
             "baby_count": data.get("baby_count", 1),
-            "babies": json.dumps(data.get("babies", [])),
+            "babies": json.dumps([]),
             "baby_weight": data.get("baby_weight"),
             "observations": data.get("observations", ""),
             "status": "completed",
@@ -328,30 +364,113 @@ def register_maternity_routes(app, *, runtime):
         }
         result = compatible_insert("deliveries", delivery)
         created_delivery = result.data[0] if result.data else delivery
-        tarif_code = "ACC_VAG" if delivery_type == "vaginal" else "ACC_CES"
-        facture_auto(patient_id, tarif_code, 1, "delivery", created_delivery.get("id"))
-        
-        babies = data.get("babies", [])
-        for idx, baby in enumerate(babies):
-            child_data = {
-                "full_name": f"Bébé de la patiente #{patient_id}",
-                "date_of_birth": data.get("delivery_date"),
-                "gender": baby.get("gender", "M"),
-                "parent_id": patient_id,
-                "blood_type": baby.get("blood_type", ""),
-                "birth_weight": baby.get("weight"),
-                "birth_height": baby.get("height"),
-                "created_at": now_iso(),
-                "updated_at": now_iso()
-            }
-            try:
-                compatible_insert("children", child_data)
-            except Exception as exc:
-                print(f" Fiche enfant non créée après accouchement: {exc}")
+        baby = (data.get("babies") or [{}])[0] or {}
+        baby_name = f"Enfant de {mother.get('full_name') or 'la mère'}"
+        baby_patient = {
+            "full_name": baby_name, "date_of_birth": birth_date,
+            "gender": baby.get("gender", data.get("baby_gender", "M")), "status": "active",
+            "mother_id": patient_id, "pregnancy_id": pregnancy_id, "delivery_id": created_delivery.get("id"),
+            "is_newborn": True, "birth_time": birth_at,
+            "birth_weight": baby.get("weight", data.get("baby_weight")), "delivery_mode": delivery_type,
+            "apgar": baby.get("apgar", data.get("apgar", "")),
+            "birth_observations": data.get("observations", ""), "newborn_name_locked": False,
+            "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
+            "created_at": birth_at, "updated_at": birth_at,
+        }
+        baby_result = compatible_insert(TABLES["patients"], baby_patient)
+        newborn = baby_result.data[0] if baby_result.data else baby_patient
+        if not newborn.get("id"):
+            return jsonify({"error": "Le dossier du nouveau-né n'a pas pu être créé"}), 500
+        try:
+            hid = hospital_patient_id(newborn["id"])
+            compatible_update(TABLES["patients"], {"hospital_id": hid, "updated_at": now_iso()}, "id", newborn["id"])
+            newborn["hospital_id"] = hid
+        except Exception:
+            pass
+
+        if pregnancy:
+            compatible_update("pregnancies", {"status": "completed", "updated_at": now_iso()}, "id", pregnancy_id)
+
+        # Demande normale pour la maman : aucune chambre ni lit n'est attribué ici.
+        active_hosp = supabase.table("hospitalizations").select("id").eq("patient_id", patient_id).in_("status", ["pending", "admitted", "hospitalized", "active"]).execute().data or []
+        if not active_hosp:
+            compatible_insert("hospitalizations", {
+                "patient_id": patient_id, "admission_date": None, "status": "pending",
+                "reason": f"Surveillance post-accouchement — naissance #{created_delivery.get('id')}",
+                "room": "", "bed": "", "bed_id": None, "room_id": None,
+                "doctor_id": mother.get("assigned_doctor_id"), "doctor_name": "",
+                "daily_rate": get_tariff_amount("hospitalisation", "Hospitalisation", 0),
+                "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
+                "created_at": now_iso(), "updated_at": now_iso(),
+            })
+
+        created_delivery.update({"newborn": newborn, "delivery_date": birth_date, "delivery_time": birth_at})
         
         add_audit("CREATE", "delivery", f"Accouchement #{created_delivery.get('id')}", created_delivery.get("id"))
         invalidate_cache()
         return jsonify(created_delivery), 201
+
+    @maternity.route("/api/maternity/newborns", methods=["GET"])
+    @roles_required("super_admin", "infirmier")
+    def get_newborns():
+        rows = supabase.table(TABLES["patients"]).select("*").eq("is_newborn", True).order("created_at", desc=True).execute().data or []
+        mothers = get_patient_map()
+        for baby in rows:
+            baby["mother_name"] = mothers.get(baby.get("mother_id"), "Mère inconnue")
+        return jsonify(rows)
+
+    @maternity.route("/api/maternity/newborns/<int:baby_id>", methods=["GET"])
+    @roles_required("super_admin", "infirmier")
+    def get_newborn(baby_id):
+        rows = supabase.table(TABLES["patients"]).select("*").eq("id", baby_id).eq("is_newborn", True).execute().data or []
+        if not rows:
+            return jsonify({"error": "Nouveau-né introuvable"}), 404
+        baby = rows[0]
+        baby["mother_name"] = get_patient_map().get(baby.get("mother_id"), "Mère inconnue")
+        baby["vaccines"] = newborn_vaccine_plan(baby_id)
+        return jsonify(baby)
+
+    @maternity.route("/api/maternity/newborns/<int:baby_id>/rename", methods=["POST"])
+    @roles_required("super_admin", "infirmier")
+    def rename_newborn_once(baby_id):
+        new_name = str(fast_json().get("full_name") or "").strip()
+        if not new_name:
+            return jsonify({"error": "Nom requis"}), 422
+        rows = supabase.table(TABLES["patients"]).select("id,is_newborn,newborn_name_locked").eq("id", baby_id).execute().data or []
+        if not rows or not rows[0].get("is_newborn"):
+            return jsonify({"error": "Nouveau-né introuvable"}), 404
+        if rows[0].get("newborn_name_locked"):
+            return jsonify({"error": "Le nom du bébé a déjà été confirmé et ne peut plus être modifié"}), 409
+        result = supabase.table(TABLES["patients"]).update({
+            "full_name": new_name, "newborn_name_locked": True, "updated_at": now_iso()
+        }).eq("id", baby_id).eq("newborn_name_locked", False).execute()
+        if not result.data:
+            return jsonify({"error": "Le nom du bébé a déjà été confirmé et ne peut plus être modifié"}), 409
+        add_audit("UPDATE", "newborn", f"Nom définitif du nouveau-né #{baby_id}", baby_id)
+        invalidate_cache()
+        return jsonify(result.data[0] if result.data else {"id": baby_id, "full_name": new_name, "newborn_name_locked": True})
+
+    @maternity.route("/api/maternity/newborns/<int:baby_id>/vaccines/<vaccine_code>/administer", methods=["POST"])
+    @roles_required("super_admin", "infirmier")
+    def administer_newborn_vaccine(baby_id, vaccine_code):
+        vaccine = next(((code, name) for code, name in NEWBORN_VACCINES if code == vaccine_code), None)
+        if not vaccine:
+            return jsonify({"error": "Vaccin inconnu"}), 422
+        baby = supabase.table(TABLES["patients"]).select("id,is_newborn").eq("id", baby_id).execute().data or []
+        if not baby or not baby[0].get("is_newborn"):
+            return jsonify({"error": "Nouveau-né introuvable"}), 404
+        existing = supabase.table("newborn_vaccinations").select("id").eq("baby_patient_id", baby_id).eq("vaccine_code", vaccine_code).execute().data or []
+        if existing:
+            return jsonify({"error": "Ce vaccin a déjà été effectué et est verrouillé"}), 409
+        done_at = now_iso()
+        result = compatible_insert("newborn_vaccinations", {
+            "baby_patient_id": baby_id, "vaccine_code": vaccine[0], "vaccine_name": vaccine[1], "status": "completed",
+            "administered_at": done_at, "administered_by": g.current_user["id"], "administered_by_name": g.current_user["name"],
+            "created_at": done_at, "updated_at": done_at,
+        })
+        add_audit("CREATE", "newborn_vaccination", f"{vaccine[1]} — bébé #{baby_id}", baby_id)
+        invalidate_cache()
+        return jsonify(result.data[0] if result.data else {"vaccine_code": vaccine_code, "status": "completed"}), 201
 
     @maternity.route("/api/maternity/deliveries/<int:delivery_id>", methods=["GET"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")

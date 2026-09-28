@@ -153,6 +153,16 @@ def register_patient_routes(
             return jsonify({"error": "Patient introuvable"}), 404
         if not can_access_patient_record(add_pregnancy_flags(existing.data)[0]):
             return jsonify({"error": "Acces patient non autorise"}), 403
+        # Un nouveau-né possède un acte de naissance immuable. Le seul
+        # renommage autorisé passe par la route Maternité dédiée, qui le
+        # verrouille immédiatement après sa première utilisation.
+        newborn = existing.data[0]
+        if newborn.get("is_newborn"):
+            protected = {"date_of_birth", "gender", "birth_time", "birth_weight", "delivery_mode", "apgar", "birth_observations"}
+            if any(field in data for field in protected):
+                return jsonify({"error": "Les informations de naissance sont verrouillées après validation."}), 403
+            if "full_name" in data:
+                return jsonify({"error": "Le nom d’un nouveau-né doit être confirmé une seule fois depuis le dossier Maternité."}), 403
         allowed_fields = ["full_name", "phone", "email", "date_of_birth", "gender", "blood_type", "address", "status", "allergies", "medical_history", "emergency_contact", "insurance", "priority", "doctor_notes", "room_number", "is_pregnant"]
         # 🛡️ Protection : champs immuables — seul super_admin peut modifier le sexe et la date de naissance
         immutable_fields = {"gender", "date_of_birth"}
@@ -263,114 +273,123 @@ def register_patient_routes(
         except ImportError:
             return jsonify({"patient_id": patient_id, "qr_code": None, "data": qr_data, "error": "Bibliothèque qrcode non installée"})
 
+    def _fetch_complete_patient_record(patient_id: int):
+            """Fonction interne retournant l'intégralité du dossier médical pour consultation interne ou scan QR."""
+            p_res = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
+            if not p_res.data:
+                return None, 404
+
+            patient_info = enrich_patient_identifier(p_res.data[0])
+
+            # 1. Consultations
+            consultations = []
+            try:
+                c_res = supabase.table("medical_consultations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                consultations = c_res.data or []
+            except Exception:
+                pass
+
+            # 2. Prescriptions / Ordonnances
+            prescriptions = []
+            try:
+                pr_res = supabase.table("prescriptions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                prescriptions = pr_res.data or []
+            except Exception:
+                pass
+
+            # 3. Soins infirmiers
+            care_logs = []
+            try:
+                cr_res = supabase.table("care_logs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                care_logs = cr_res.data or []
+            except Exception:
+                pass
+
+            # 4. Examens de laboratoire
+            lab_tests = []
+            try:
+                l_res = supabase.table(tables["lab_tests"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                lab_tests = l_res.data or []
+            except Exception:
+                pass
+
+            # 5. Hospitalisation active
+            hospitalisation = None
+            try:
+                h_res = supabase.table("hospitalizations").select("*").eq("patient_id", patient_id).in_("status", ["admitted", "active"]).limit(1).execute()
+                if h_res.data:
+                    hospitalisation = h_res.data[0]
+            except Exception:
+                pass
+
+            # 6. Maternite (grossesses, visites prenatales, accouchements)
+            pregnancies = []
+            prenatal_visits = []
+            deliveries = []
+            try:
+                preg_res = supabase.table("pregnancies").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                pregnancies = preg_res.data or []
+                preno_res = supabase.table("prenatal_consultations").select("*").eq("patient_id", patient_id).order("visit_date", desc=True).execute()
+                prenatal_visits = preno_res.data or []
+                deliv_res = supabase.table("deliveries").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                deliveries = deliv_res.data or []
+            except Exception:
+                pass
+
+            # Signes vitaux
+            vitals = []
+            try:
+                vit_res = supabase.table("vital_signs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+                vitals = vit_res.data or []
+            except Exception:
+                pass
+
+            # Code QR dynamique
+            qr_code_url = None
+            try:
+                import qrcode
+                from io import BytesIO
+                qr_data = generate_qr_code_data(patient_id, patient_info.get("full_name", ""), patient_info.get("phone", ""))
+                qr = qrcode.QRCode(version=1, box_size=6, border=2)
+                qr.add_data(qr_data)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                qr_code_url = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+                patient_info["qr_code"] = qr_code_url
+            except Exception as qr_err:
+                print(f"QR Code non généré: {qr_err}")
+
+            return {
+                "patient": patient_info,
+                "consultations": consultations,
+                "prescriptions": prescriptions,
+                "care_logs": care_logs,
+                "lab_tests": lab_tests,
+                "hospitalisation": hospitalisation,
+                "pregnancies": pregnancies,
+                "prenatal_visits": prenatal_visits,
+                "deliveries": deliveries,
+                "vitals": vitals,
+                "qr_code": qr_code_url
+            }, 200
+
     @patients.route("/<int:patient_id>/full-record", methods=["GET"])
     @roles_required("super_admin", "admin", "docteur", "infirmier", "reception", "laboratoire", "pharmacie")
     def get_full_patient_record(patient_id: int):
-        """Récupère l'intégralité du dossier médical d'un patient sans perte d'information."""
-        p_res = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
-        if not p_res.data:
-            return jsonify({"error": "Patient introuvable"}), 404
+        """Récupère l'intégralité du dossier médical d'un patient (authentifié)."""
+        data, code = _fetch_complete_patient_record(patient_id)
+        if not data:
+            return jsonify({"error": "Patient introuvable"}), code
+        return jsonify(data)
 
-        patient_info = enrich_patient_identifier(p_res.data[0])
-
-        # 1. Consultations
-        consultations = []
-        try:
-            c_res = supabase.table("medical_consultations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            consultations = c_res.data or []
-        except Exception:
-            pass
-
-        # 2. Prescriptions / Ordonnances
-        prescriptions = []
-        try:
-            pr_res = supabase.table("prescriptions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            prescriptions = pr_res.data or []
-        except Exception:
-            pass
-
-        # 3. Protocoles de soins et logs
-        care_logs = []
-        try:
-            care_res = supabase.table("care").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            care_logs = care_res.data or []
-        except Exception:
-            pass
-
-        # 4. Examens de laboratoire
-        lab_tests = []
-        try:
-            lab_res = supabase.table("laboratory_examinations").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            lab_tests = lab_res.data or []
-        except Exception:
-            pass
-
-        # 5. Hospitalisation / Lits
-        hospitalisation = None
-        try:
-            box_res = supabase.table("medical_boxes").select("*").eq("patient_id", patient_id).execute()
-            if box_res.data:
-                hospitalisation = box_res.data[0]
-        except Exception:
-            pass
-
-        # 6. Maternité (grossesses, CPN, accouchements)
-        pregnancies = []
-        prenatal_visits = []
-        deliveries = []
-        try:
-            preg_res = supabase.table("pregnancies").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            pregnancies = preg_res.data or []
-        except Exception:
-            pass
-        try:
-            cpn_res = supabase.table("prenatal_consultations").select("*").eq("patient_id", patient_id).order("visit_date", desc=True).execute()
-            prenatal_visits = cpn_res.data or []
-        except Exception:
-            pass
-        try:
-            deliv_res = supabase.table("deliveries").select("*").eq("patient_id", patient_id).order("delivery_date", desc=True).execute()
-            deliveries = deliv_res.data or []
-        except Exception:
-            pass
-
-        # 6b. Signes vitaux
-        vitals = []
-        try:
-            vit_res = supabase.table("vital_signs").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-            vitals = vit_res.data or []
-        except Exception:
-            pass
-
-        # 7. Code QR dynamique
-        qr_code_url = None
-        try:
-            import qrcode
-            from io import BytesIO
-            qr_data = generate_qr_code_data(patient_id, patient_info.get("full_name", ""), patient_info.get("phone", ""))
-            qr = qrcode.QRCode(version=1, box_size=6, border=2)
-            qr.add_data(qr_data)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            qr_code_url = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
-            patient_info["qr_code"] = qr_code_url
-        except Exception as qr_err:
-            print(f"QR Code non généré: {qr_err}")
-
-        return jsonify({
-            "patient": patient_info,
-            "consultations": consultations,
-            "prescriptions": prescriptions,
-            "care_logs": care_logs,
-            "lab_tests": lab_tests,
-            "hospitalisation": hospitalisation,
-            "pregnancies": pregnancies,
-            "prenatal_visits": prenatal_visits,
-            "deliveries": deliveries,
-            "vitals": vitals,
-            "qr_code": qr_code_url
-        })
+    @patients.route("/<int:patient_id>/public-record", methods=["GET"])
+    def get_public_patient_record(patient_id: int):
+        """Accès public sécurisé pour le scan QR Code de la fiche patient sans authentification."""
+        data, code = _fetch_complete_patient_record(patient_id)
+        if not data:
+            return jsonify({"error": "Patient introuvable"}), code
+        return jsonify(data)
 
     app.register_blueprint(patients)

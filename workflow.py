@@ -372,16 +372,15 @@ def register_workflow_routes(app, *, runtime):
             box = box_check.data[0]
             if to_int(box.get("doctor_id")) != doctor_id:
                 return jsonify({"error": "Ce box n'est pas attribué au médecin sélectionné"}), 422
-            # On permet le dispatch meme si le box est occupe — le patient sera
-            # en file d'attente dans la salle d'attente du medecin.
-            if box.get("status") == "free":
-                supabase.table("medical_boxes").update({
-                    "status": "occupied",
-                    "patient_id": patient_id,
-                    "patient_name": get_patient_map().get(patient_id, "Patient"),
-                    "occupied_at": now_iso(),
-                    "updated_at": now_iso()
-                }).eq("id", to_int(box_id)).execute()
+            if box.get("status") != "free":
+                return jsonify({"error": "Ce box est déjà occupé"}), 422
+            supabase.table("medical_boxes").update({
+                "status": "occupied",
+                "patient_id": patient_id,
+                "patient_name": get_patient_map().get(patient_id, "Patient"),
+                "occupied_at": now_iso(),
+                "updated_at": now_iso()
+            }).eq("id", to_int(box_id)).execute()
         
         payload = {
             "patient_id": patient_id,
@@ -614,8 +613,8 @@ def register_workflow_routes(app, *, runtime):
     @roles_required("super_admin", "infirmier", "docteur", "reception")
     def hospitalization_rooms():
         if request.method == "GET":
-            return jsonify(hardcoded_hospitalization_rooms())
-        return jsonify({"error": "Les chambres sont définies dans le catalogue ROOMS et ne peuvent pas être créées via l'API"}), 405
+            return jsonify(hospitalization_rooms_from_db())
+        return jsonify({"error": "Les chambres sont administrées depuis la base de données"}), 405
 
     @workflow.route("/api/workflow/hospitalizations", methods=["GET", "POST"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")
@@ -768,7 +767,7 @@ def register_workflow_routes(app, *, runtime):
                 return jsonify({"error": "Chambre requise pour l'admission"}), 422
             if not str(data.get("bed_id") or data.get("bed") or "").strip():
                 return jsonify({"error": "Lit requis pour l'admission"}), 422
-            room = next((item for item in hardcoded_hospitalization_rooms() if item["id"] == room_id), None)
+            room = next((item for item in hospitalization_rooms_from_db() if to_int(item.get("id")) == room_id), None)
             if not room:
                 return jsonify({"error": "Chambre introuvable"}), 404
             requested_bed = str(data.get("bed_id") or data.get("bed"))
@@ -1071,17 +1070,24 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+        active_hosp = supabase.table("hospitalizations").select("id").eq("patient_id", patient_id).in_(
+            "status", ["admitted", "hospitalized", "active"]
+        ).order("created_at", desc=True).limit(1).execute().data or []
         
         payload = {
             "patient_id": patient_id,
+            "hospitalization_id": active_hosp[0].get("id") if active_hosp else None,
             "temperature": data.get("temperature"),
             "blood_pressure_sys": data.get("blood_pressure_sys"),
             "blood_pressure_dia": data.get("blood_pressure_dia"),
             "heart_rate": data.get("heart_rate"),
             "respiratory_rate": data.get("respiratory_rate"),
+            "oxygen_saturation": data.get("oxygen_saturation"),
+            "weight": data.get("weight"),
             "pain_level": data.get("pain_level"),
             "general_state": data.get("general_state", "good"),
             "notes": data.get("notes", ""),
+            "recorded_at": data.get("recorded_at") or now_iso(),
             "nurse_id": g.current_user.get("id"),
             "nurse_name": g.current_user.get("name") or g.current_user.get("email"),
             "created_at": now_iso(),
