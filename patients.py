@@ -82,13 +82,30 @@ def register_patient_routes(
         full_name = data.get("full_name", "").strip()
         if not full_name:
             return jsonify({"error": "Nom requis"}), 422
+        # Construction adresse structurée & contact urgence
+        addr_val = data.get("address", "")
+        if not addr_val and any(data.get(k) for k in ("commune", "quartier", "avenue", "numero")):
+            parts = [
+                f"N° {data.get('numero')}" if data.get('numero') else "",
+                f"Av. {data.get('avenue')}" if data.get('avenue') else "",
+                f"Q. {data.get('quartier')}" if data.get('quartier') else "",
+                f"C. {data.get('commune')}" if data.get('commune') else ""
+            ]
+            addr_val = ", ".join(p for p in parts if p)
+
+        emg_val = data.get("emergency_contact", "")
+        if not emg_val and any(data.get(k) for k in ("emergency_name", "emergency_postnom", "emergency_phone")):
+            emg_name_full = f"{data.get('emergency_name', '')} {data.get('emergency_postnom', '')}".strip()
+            emg_phone = data.get('emergency_phone', '')
+            emg_val = f"{emg_name_full} ({emg_phone})" if emg_phone else emg_name_full
+
         patient = {
             "full_name": full_name, "phone": data.get("phone", ""), "email": data.get("email", ""),
             "date_of_birth": optional_date(data.get("date_of_birth")), "gender": data.get("gender", ""),
-            "blood_type": data.get("blood_type", ""), "address": data.get("address", ""),
+            "blood_type": data.get("blood_type", ""), "address": addr_val,
             "status": data.get("status", "waiting"), "allergies": data.get("allergies", ""),
             "medical_history": data.get("medical_history", ""),
-            "emergency_contact": data.get("emergency_contact", ""), "insurance": data.get("insurance", ""),
+            "emergency_contact": emg_val, "insurance": data.get("insurance", ""),
             "priority": data.get("priority", "normal"), "doctor_notes": data.get("doctor_notes", ""),
             "room_number": data.get("room_number", ""), "is_pregnant": data.get("is_pregnant", False),
             "created_by": g.current_user.get("id"),
@@ -163,7 +180,7 @@ def register_patient_routes(
                 return jsonify({"error": "Les informations de naissance sont verrouillées après validation."}), 403
             if "full_name" in data:
                 return jsonify({"error": "Le nom d’un nouveau-né doit être confirmé une seule fois depuis le dossier Maternité."}), 403
-        allowed_fields = ["full_name", "phone", "email", "date_of_birth", "gender", "blood_type", "address", "status", "allergies", "medical_history", "emergency_contact", "insurance", "priority", "doctor_notes", "room_number", "is_pregnant"]
+        allowed_fields = ["full_name", "phone", "email", "date_of_birth", "gender", "blood_type", "address", "status", "allergies", "medical_history", "emergency_contact", "insurance", "priority", "doctor_notes", "room_number", "is_pregnant", "commune", "quartier", "avenue", "numero", "emergency_name", "emergency_postnom", "emergency_phone"]
         # 🛡️ Protection : champs immuables — seul super_admin peut modifier le sexe et la date de naissance
         immutable_fields = {"gender", "date_of_birth"}
         if g.current_user.get("role") != "super_admin":

@@ -272,9 +272,9 @@ def register_medical_routes(app, *, runtime):
                 except Exception:
                     desc_obj = {}
                 has_products = bool(desc_obj.get("injectables") or desc_obj.get("consumables") or desc_obj.get("requires_pharmacy"))
-                pharm_status = desc_obj.get("pharmacy_status") or desc_obj.get("delivery_status") or care_row.data[0].get("status")
-                allowed_statuses = ("delivered", "dispensed", "completed", "scheduled", "in_progress", "active")
-                is_unblocked = (pharm_status in allowed_statuses) or (care_row.data[0].get("status") in allowed_statuses)
+                pharm_status = desc_obj.get("pharmacy_status") or desc_obj.get("delivery_status")
+                # Blocage strict : seuls les statuts 'delivered' ou 'dispensed' débloquent l'administration
+                is_unblocked = pharm_status in ("delivered", "dispensed")
                 if has_products and not is_unblocked:
                     return jsonify({"error": "Soin bloqué : les produits pharmaceutiques doivent d'abord être livrés par la pharmacie."}), 422
 

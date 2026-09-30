@@ -219,13 +219,8 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
-        # 🛡️ Protection : empêcher la double saisie de signes vitaux pour le même passage
-        active_queue = supabase.table("patient_queue").select("id,status").eq("patient_id", patient_id).eq("status", "vitals_done").execute().data or []
-        if active_queue:
-            return jsonify({
-                "error": "Les signes vitaux ont déjà été enregistrés pour ce passage. Un seul enregistrement est autorisé par passage.",
-                "queue_id": active_queue[0].get("id")
-            }), 409
+        # Enregistrement souple : permet la mise à jour / réévaluation des constantes sans blocage 409
+        # (indispensable lors du suivi quotidien ou d'une correction par l'infirmier)
         
         # Garde-fous physiologiques (détection d'erreurs de frappe aberrantes)
         temp_val = to_float(data.get("temperature"), 0)
@@ -505,7 +500,7 @@ def register_workflow_routes(app, *, runtime):
         if not current_patient or current_patient[0].get("status") not in ("admitted", "discharged"):
             supabase.table(TABLES["patients"]).update({"status": "active", "updated_at": now_iso()}).eq("id", patient_id).execute()
         
-        # Libérer le box médical automatiquement
+                # Libérer le box médical automatiquement (par patient ou par médecin actif)
         try:
             supabase.table("medical_boxes").update({
                 "status": "free",
@@ -514,6 +509,14 @@ def register_workflow_routes(app, *, runtime):
                 "occupied_at": None,
                 "updated_at": now_iso()
             }).eq("patient_id", patient_id).execute()
+            if doctor_id:
+                supabase.table("medical_boxes").update({
+                    "status": "free",
+                    "patient_id": None,
+                    "patient_name": None,
+                    "occupied_at": None,
+                    "updated_at": now_iso()
+                }).eq("doctor_id", doctor_id).execute()
         except Exception as e:
             print(f"Erreur libération box: {e}")
         
@@ -613,8 +616,8 @@ def register_workflow_routes(app, *, runtime):
     @roles_required("super_admin", "infirmier", "docteur", "reception")
     def hospitalization_rooms():
         if request.method == "GET":
-            return jsonify(hardcoded_hospitalization_rooms())
-        return jsonify({"error": "Les chambres sont définies dans le catalogue ROOMS et ne peuvent pas être créées via l'API"}), 405
+            return jsonify(hospitalization_rooms_from_db())
+        return jsonify({"error": "Les chambres sont administrées depuis la base de données"}), 405
 
     @workflow.route("/api/workflow/hospitalizations", methods=["GET", "POST"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")
@@ -767,7 +770,7 @@ def register_workflow_routes(app, *, runtime):
                 return jsonify({"error": "Chambre requise pour l'admission"}), 422
             if not str(data.get("bed_id") or data.get("bed") or "").strip():
                 return jsonify({"error": "Lit requis pour l'admission"}), 422
-            room = next((item for item in hardcoded_hospitalization_rooms() if item["id"] == room_id), None)
+            room = next((item for item in hospitalization_rooms_from_db() if to_int(item.get("id")) == room_id), None)
             if not room:
                 return jsonify({"error": "Chambre introuvable"}), 404
             requested_bed = str(data.get("bed_id") or data.get("bed"))
@@ -782,9 +785,22 @@ def register_workflow_routes(app, *, runtime):
                 return jsonify({"error": "Ce lit est déjà occupé"}), 422
             if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
                 return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
-            data = {**data, "room": room.get("room_number"), "status": "admitted", "admission_date": data.get("admission_date") or now_iso(),
-                    "admitted_by": g.current_user["id"], "admitted_by_name": g.current_user["name"]}
-            supabase.table(TABLES["patients"]).update({"status": "admitted", "updated_at": now_iso()}).eq("id", current.get("patient_id")).execute()
+            data = {
+                **data,
+                "room": room.get("room_number"),
+                "room_id": room_id,
+                "bed": str(requested_bed),
+                "bed_id": to_int(requested_bed, 1),
+                "status": "admitted",
+                "admission_date": data.get("admission_date") or now_iso(),
+                "admitted_by": g.current_user["id"],
+                "admitted_by_name": g.current_user["name"]
+            }
+            supabase.table(TABLES["patients"]).update({
+                "status": "admitted",
+                "room_number": room.get("room_number"),
+                "updated_at": now_iso()
+            }).eq("id", current.get("patient_id")).execute()
         allowed = ("admission_date", "discharge_date", "room", "bed", "bed_id", "room_id", "reason", "doctor_id", "doctor_name", "daily_rate", "notes", "status", "admitted_by", "admitted_by_name")
         updates = {key: value for key, value in data.items() if key in allowed and value is not None}
         if not updates:
@@ -1070,17 +1086,24 @@ def register_workflow_routes(app, *, runtime):
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
             return jsonify({"error": "Patient requis"}), 422
+        active_hosp = supabase.table("hospitalizations").select("id").eq("patient_id", patient_id).in_(
+            "status", ["admitted", "hospitalized", "active"]
+        ).order("created_at", desc=True).limit(1).execute().data or []
         
         payload = {
             "patient_id": patient_id,
+            "hospitalization_id": active_hosp[0].get("id") if active_hosp else None,
             "temperature": data.get("temperature"),
             "blood_pressure_sys": data.get("blood_pressure_sys"),
             "blood_pressure_dia": data.get("blood_pressure_dia"),
             "heart_rate": data.get("heart_rate"),
             "respiratory_rate": data.get("respiratory_rate"),
+            "oxygen_saturation": data.get("oxygen_saturation"),
+            "weight": data.get("weight"),
             "pain_level": data.get("pain_level"),
             "general_state": data.get("general_state", "good"),
             "notes": data.get("notes", ""),
+            "recorded_at": data.get("recorded_at") or now_iso(),
             "nurse_id": g.current_user.get("id"),
             "nurse_name": g.current_user.get("name") or g.current_user.get("email"),
             "created_at": now_iso(),

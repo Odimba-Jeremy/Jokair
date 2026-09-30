@@ -10,6 +10,28 @@ def register_maternity_routes(app, *, runtime):
     maternity = Blueprint("maternity", __name__)
 
     NEWBORN_VACCINES = (("BCG", "BCG"), ("VPO0", "VPO 0"), ("HEPB0", "Hépatite B — naissance"))
+    # Catalogue vaccinal standard étendu (PEV élargi)
+    DEFAULT_VACCINE_CATALOG = [
+        {"code": "BCG", "name": "BCG (Tuberculose)", "target_age_months": 0, "target_age_label": "Naissance (0 mois)"},
+        {"code": "VPO0", "name": "VPO 0 (Poliomyélite)", "target_age_months": 0, "target_age_label": "Naissance (0 mois)"},
+        {"code": "HEPB0", "name": "Hépatite B (Naissance)", "target_age_months": 0, "target_age_label": "Naissance (0 mois)"},
+        {"code": "PENTA1", "name": "Pentavalent 1 (DTC-HepB-Hib)", "target_age_months": 1.5, "target_age_label": "6 semaines (1.5 mois)"},
+        {"code": "VPO1", "name": "VPO 1 (Poliomyélite)", "target_age_months": 1.5, "target_age_label": "6 semaines (1.5 mois)"},
+        {"code": "PNEUMO1", "name": "Pneumocoque 1", "target_age_months": 1.5, "target_age_label": "6 semaines (1.5 mois)"},
+        {"code": "ROTA1", "name": "Rotavirus 1", "target_age_months": 1.5, "target_age_label": "6 semaines (1.5 mois)"},
+        {"code": "PENTA2", "name": "Pentavalent 2 (DTC-HepB-Hib)", "target_age_months": 2.5, "target_age_label": "10 semaines (2.5 mois)"},
+        {"code": "VPO2", "name": "VPO 2 (Poliomyélite)", "target_age_months": 2.5, "target_age_label": "10 semaines (2.5 mois)"},
+        {"code": "PNEUMO2", "name": "Pneumocoque 2", "target_age_months": 2.5, "target_age_label": "10 semaines (2.5 mois)"},
+        {"code": "ROTA2", "name": "Rotavirus 2", "target_age_months": 2.5, "target_age_label": "10 semaines (2.5 mois)"},
+        {"code": "PENTA3", "name": "Pentavalent 3 (DTC-HepB-Hib)", "target_age_months": 3.5, "target_age_label": "14 semaines (3.5 mois)"},
+        {"code": "VPO3", "name": "VPO 3 (Poliomyélite)", "target_age_months": 3.5, "target_age_label": "14 semaines (3.5 mois)"},
+        {"code": "VPI", "name": "VPI (Polio injectable)", "target_age_months": 3.5, "target_age_label": "14 semaines (3.5 mois)"},
+        {"code": "PNEUMO3", "name": "Pneumocoque 3", "target_age_months": 3.5, "target_age_label": "14 semaines (3.5 mois)"},
+        {"code": "VAR", "name": "VAR (Rougeole)", "target_age_months": 9, "target_age_label": "9 mois"},
+        {"code": "VAA", "name": "VAA (Fièvre Jaune)", "target_age_months": 9, "target_age_label": "9 mois"},
+        {"code": "MENA", "name": "Méningite A", "target_age_months": 18, "target_age_label": "18 mois"}
+    ]
+
 
     def newborn_vaccine_plan(baby_patient_id):
         """Calendrier fixe, enrichi uniquement des doses effectivement réalisées."""
@@ -558,5 +580,83 @@ def register_maternity_routes(app, *, runtime):
         return jsonify(result.data[0])
 
     # ==================== PÉDIATRIE ROUTES ====================
+
+
+    @maternity.route("/api/maternity/vaccine-catalog", methods=["GET", "POST"])
+    @roles_required("super_admin", "infirmier", "docteur")
+    def maternity_vaccine_catalog():
+        if request.method == "GET":
+            # Si table en base disponible, fusionner avec DEFAULT_VACCINE_CATALOG
+            try:
+                rows = supabase.table("vaccine_catalog").select("*").execute().data or []
+            except Exception:
+                rows = []
+            codes_in_db = {r.get("code") for r in rows}
+            combined = list(rows)
+            for v in DEFAULT_VACCINE_CATALOG:
+                if v["code"] not in codes_in_db:
+                    combined.append(v)
+            return jsonify(combined)
+        
+        # POST - Ajouter un vaccin au catalogue
+        data = fast_json()
+        code = str(data.get("code") or "").strip().upper()
+        name = str(data.get("name") or "").strip()
+        target_age = to_float(data.get("target_age_months"), 0)
+        label = str(data.get("target_age_label") or f"{target_age} mois").strip()
+        if not code or not name:
+            return jsonify({"error": "Code et nom de vaccin requis"}), 422
+        
+        new_item = {
+            "code": code,
+            "name": name,
+            "target_age_months": target_age,
+            "target_age_label": label,
+            "created_at": now_iso()
+        }
+        try:
+            compatible_insert("vaccine_catalog", new_item)
+        except Exception:
+            pass
+        return jsonify(new_item), 201
+
+    @maternity.route("/api/maternity/children", methods=["POST"])
+    @roles_required("super_admin", "infirmier")
+    def create_child_manual():
+        data = fast_json()
+        full_name = str(data.get("full_name") or "").strip()
+        dob = optional_date(data.get("date_of_birth"))
+        if not full_name or not dob:
+            return jsonify({"error": "Nom et date de naissance requis"}), 422
+        
+        mother_id = to_int(data.get("mother_id"))
+        child_patient = {
+            "full_name": full_name,
+            "date_of_birth": dob,
+            "gender": data.get("gender", "M"),
+            "blood_type": data.get("blood_type", ""),
+            "status": "active",
+            "mother_id": mother_id,
+            "is_newborn": True,
+            "birth_weight": to_float(data.get("birth_weight")),
+            "delivery_mode": data.get("delivery_mode", "vaginal"),
+            "birth_observations": data.get("birth_observations", ""),
+            "created_by": g.current_user["id"],
+            "created_by_name": g.current_user["name"],
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        }
+        res = compatible_insert(TABLES["patients"], child_patient)
+        created = res.data[0] if res.data else child_patient
+        if created.get("id"):
+            hid = hospital_patient_id(created["id"])
+            try:
+                supabase.table(TABLES["patients"]).update({"hospital_id": hid}).eq("id", created["id"]).execute()
+                created["hospital_id"] = hid
+            except Exception:
+                pass
+        add_audit("CREATE", "child_patient", f"Enfant #{created.get('id')}: {full_name}", created.get("id"))
+        invalidate_cache()
+        return jsonify(created), 201
 
     app.register_blueprint(maternity)

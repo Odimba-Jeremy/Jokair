@@ -342,39 +342,142 @@ def register_laboratory_routes(app, *, runtime):
                     "aliases": ["vs", "vitesse de sedimentation", "vitesse de sédimentation"],
                     "sample": "Sang total citraté",
                     "params": [
-                        {"code": "vs_1h", "name": "1ère heure", "unit": "mm", "ref_min": 0, "ref_max": 15, "ref_text": "< 15 mm (H) / < 20 mm (F)", "type": "number"},
-                        {"code": "vs_2h", "name": "2ème heure", "unit": "mm", "ref_min": 0, "ref_max": 30, "ref_text": "< 25 mm (H) / < 30 mm (F)", "type": "number"}
+                        {"code": "vs_1h", "name": "VS 1ère heure", "unit": "mm", "ref_min": 0, "ref_max": 15, "ref_text": "< 15 mm (H) / < 20 mm (F)", "type": "number"},
+                        {"code": "vs_2h", "name": "VS 2ème heure", "unit": "mm", "ref_min": 0, "ref_max": 30, "ref_text": "< 25 mm (H) / < 30 mm (F)", "type": "number"}
+                    ]
+                },
+                "GB": {
+                    "code": "GB",
+                    "name": "GB",
+                    "full_name": "GB (Globules blancs)",
+                    "aliases": ["gb", "globules blancs", "leucocytes"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "gb", "name": "GB", "unit": "G/L", "ref_min": 4.0, "ref_max": 10.0, "ref_text": "4.0 - 10.0 G/L (4000 - 10000 /mm³)", "type": "number", "decimal": 1}
+                    ]
+                },
+                "Hb": {
+                    "code": "Hb",
+                    "name": "Hb",
+                    "full_name": "Hb (Hémoglobine)",
+                    "aliases": ["hb", "hemoglobine", "hémoglobine"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "hb", "name": "Hb", "unit": "g/dL", "ref_min": 12.0, "ref_max": 17.5, "ref_text": "12.0 - 16.0 (F) / 13.0 - 17.5 (H) g/dL", "type": "number", "decimal": 1}
                     ]
                 },
                 "NFS": {
-                    "code": "NFS",
-                    "name": "NFS",
-                    "full_name": "NFS (Numération Formule Sanguine)",
-                    "aliases": ["nfs", "hemogramme", "hémogramme", "numeration formule sanguine", "numération formule sanguine", "nfs / hemogramme"],
+                    "code": "NFS — Formule leucocytaire",
+                    "name": "NFS — Formule leucocytaire",
+                    "full_name": "NFS — Formule leucocytaire",
+                    "aliases": ["nfs — formule leucocytaire", "nfs", "formule leucocytaire", "nfs formule leucocytaire"],
                     "sample": "Sang total EDTA",
                     "params": [
-                        {"code": "gb", "name": "GB (Globules blancs)", "unit": "G/L", "ref_min": 4.0, "ref_max": 10.0, "ref_text": "4.0 - 10.0 G/L", "type": "number", "decimal": 1},
-                        {"code": "hb", "name": "Hb (Hémoglobine)", "unit": "g/dL", "ref_min": 12.0, "ref_max": 17.5, "ref_text": "12.0 - 16.0 (F) / 13.0 - 17.5 (H) g/dL", "type": "number", "decimal": 1},
-                        {"code": "fl", "name": "Formule leucocytaire", "unit": "%", "ref_text": "Neutro 40-75%, Lympho 20-45%, Mono 2-10%, Eosino 1-5%, Baso 0-1%", "type": "text"},
-                        {"code": "hct", "name": "HCT (Hématocrite)", "unit": "%", "ref_min": 36.0, "ref_max": 52.0, "ref_text": "36 - 46% (F) / 40 - 52% (H)", "type": "number", "decimal": 1},
-                        {"code": "vgm", "name": "VGM", "unit": "fL", "ref_min": 80.0, "ref_max": 100.0, "ref_text": "80 - 100 fL", "type": "number", "decimal": 1},
-                        {"code": "tcmh", "name": "TCMH", "unit": "pg", "ref_min": 27.0, "ref_max": 32.0, "ref_text": "27 - 32 pg", "type": "number", "decimal": 1},
-                        {"code": "ccmh", "name": "CCMH", "unit": "g/dL", "ref_min": 32.0, "ref_max": 36.0, "ref_text": "32 - 36 g/dL", "type": "number", "decimal": 1},
-                        {"code": "idr_cv", "name": "IDR-CV", "unit": "%", "ref_min": 11.5, "ref_max": 14.5, "ref_text": "11.5 - 14.5 %", "type": "number", "decimal": 1},
-                        {"code": "plt", "name": "PLT (Plaquettes)", "unit": "G/L", "ref_min": 150.0, "ref_max": 450.0, "ref_text": "150 - 450 G/L", "type": "number", "decimal": 0},
-                        {"code": "vpm", "name": "VPM", "unit": "fL", "ref_min": 7.5, "ref_max": 11.5, "ref_text": "7.5 - 11.5 fL", "type": "number", "decimal": 1},
-                        {"code": "idp", "name": "IDP", "unit": "%", "ref_min": 10.0, "ref_max": 18.0, "ref_text": "10 - 18 %", "type": "number", "decimal": 1},
-                        {"code": "pct", "name": "PCT (Plaquettocrite)", "unit": "%", "ref_min": 0.15, "ref_max": 0.40, "ref_text": "0.15 - 0.40 %", "type": "number", "decimal": 2}
+                        {"code": "neutrophiles", "name": "Polynucléaires neutrophiles", "unit": "%", "ref_min": 40.0, "ref_max": 75.0, "ref_text": "40 - 75 %", "type": "number", "decimal": 1},
+                        {"code": "lymphocytes", "name": "Lymphocytes", "unit": "%", "ref_min": 20.0, "ref_max": 45.0, "ref_text": "20 - 45 %", "type": "number", "decimal": 1},
+                        {"code": "monocytes", "name": "Monocytes", "unit": "%", "ref_min": 2.0, "ref_max": 10.0, "ref_text": "2 - 10 %", "type": "number", "decimal": 1},
+                        {"code": "eosinophiles", "name": "Polynucléaires éosinophiles", "unit": "%", "ref_min": 1.0, "ref_max": 5.0, "ref_text": "1 - 5 %", "type": "number", "decimal": 1},
+                        {"code": "basophiles", "name": "Polynucléaires basophiles", "unit": "%", "ref_min": 0.0, "ref_max": 1.0, "ref_text": "0 - 1 %", "type": "number", "decimal": 1}
                     ]
                 },
-                "TGP": {
-                    "code": "TGP",
+                "HCT": {
+                    "code": "HCT",
+                    "name": "HCT",
+                    "full_name": "HCT (Hématocrite)",
+                    "aliases": ["hct", "hematocrite", "hématocrite"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "hct", "name": "HCT", "unit": "%", "ref_min": 36.0, "ref_max": 52.0, "ref_text": "36 - 46 % (F) / 40 - 52 % (H)", "type": "number", "decimal": 1}
+                    ]
+                },
+                "VGM": {
+                    "code": "VGM",
+                    "name": "VGM",
+                    "full_name": "VGM (Volume globulaire moyen)",
+                    "aliases": ["vgm"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "vgm", "name": "VGM", "unit": "fL", "ref_min": 80.0, "ref_max": 100.0, "ref_text": "80 - 100 fL", "type": "number", "decimal": 1}
+                    ]
+                },
+                "TCMH": {
+                    "code": "TCMH",
+                    "name": "TCMH",
+                    "full_name": "TCMH (Teneur corpusculaire moyenne)",
+                    "aliases": ["tcmh"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "tcmh", "name": "TCMH", "unit": "pg", "ref_min": 27.0, "ref_max": 32.0, "ref_text": "27 - 32 pg", "type": "number", "decimal": 1}
+                    ]
+                },
+                "CCMH": {
+                    "code": "CCMH",
+                    "name": "CCMH",
+                    "full_name": "CCMH (Concentration corpusculaire moyenne)",
+                    "aliases": ["ccmh"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "ccmh", "name": "CCMH", "unit": "g/dL", "ref_min": 32.0, "ref_max": 36.0, "ref_text": "32 - 36 g/dL", "type": "number", "decimal": 1}
+                    ]
+                },
+                "IDR-CV": {
+                    "code": "IDR-CV",
+                    "name": "IDR-CV",
+                    "full_name": "IDR-CV",
+                    "aliases": ["idr-cv", "idr_cv", "rdw"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "idr_cv", "name": "IDR-CV", "unit": "%", "ref_min": 11.5, "ref_max": 14.5, "ref_text": "11.5 - 14.5 %", "type": "number", "decimal": 1}
+                    ]
+                },
+                "PLT": {
+                    "code": "PLT",
+                    "name": "PLT",
+                    "full_name": "PLT (Plaquettes)",
+                    "aliases": ["plt", "plaquettes"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "plt", "name": "PLT", "unit": "G/L", "ref_min": 150.0, "ref_max": 450.0, "ref_text": "150 - 450 G/L (150 000 - 450 000 /mm³)", "type": "number", "decimal": 0}
+                    ]
+                },
+                "VPM": {
+                    "code": "VPM",
+                    "name": "VPM",
+                    "full_name": "VPM (Volume plaquettaire moyen)",
+                    "aliases": ["vpm", "mpv"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "vpm", "name": "VPM", "unit": "fL", "ref_min": 7.4, "ref_max": 10.4, "ref_text": "7.4 - 10.4 fL", "type": "number", "decimal": 1}
+                    ]
+                },
+                "IDP": {
+                    "code": "IDP",
+                    "name": "IDP",
+                    "full_name": "IDP (Indice de distribution plaquettaire)",
+                    "aliases": ["idp", "pdw"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "idp", "name": "IDP", "unit": "%", "ref_min": 10.0, "ref_max": 18.0, "ref_text": "10 - 18 %", "type": "number", "decimal": 1}
+                    ]
+                },
+                "PCT": {
+                    "code": "PCT",
+                    "name": "PCT",
+                    "full_name": "PCT (Plaquettocrite)",
+                    "aliases": ["pct"],
+                    "sample": "Sang total EDTA",
+                    "params": [
+                        {"code": "pct", "name": "PCT", "unit": "%", "ref_min": 0.15, "ref_max": 0.50, "ref_text": "0.15 - 0.50 %", "type": "number", "decimal": 2}
+                    ]
+                },
+                "P-TGP": {
+                    "code": "P-TGP",
                     "name": "P-TGP",
                     "full_name": "P-TGP (Transaminases ALAT)",
                     "aliases": ["p-tgp", "tgp", "alat", "alt", "transaminases"],
                     "sample": "Sérum",
                     "params": [
-                        {"code": "tgp", "name": "P-TGP / ALAT", "unit": "U/L", "ref_min": 0, "ref_max": 45, "ref_text": "< 45 U/L (H) / < 35 U/L (F)", "type": "number", "decimal": 0}
+                        {"code": "tgp", "name": "P-TGP", "unit": "U/L", "ref_min": 0, "ref_max": 45, "ref_text": "< 45 U/L (H) / < 35 U/L (F)", "type": "number", "decimal": 0}
                     ]
                 }
             }
