@@ -413,6 +413,8 @@ def register_invitations_routes(app, *, runtime: dict):
         email = str(data.get("email") or "").lower().strip()
         role = str(data.get("role") or "").strip()
         message = str(data.get("message") or "").strip() or None
+        # Diagnostic Render : ne révèle ni clé API ni token.
+        print(f"[INVITATION] Demande reçue pour {mask_email(email)} (rôle: {role or 'absent'})")
 
         if not email or "@" not in email:
             return jsonify({"error": "Adresse e-mail invalide"}), 422
@@ -458,6 +460,7 @@ def register_invitations_routes(app, *, runtime: dict):
         # Envoi de l'e-mail via Email Craft
         inviter_name = g.current_user.get("name", "L'administration I-HUB")
         email_res = send_invitation_email(email, invite_url, role, inviter_name, message)
+        print(f"[INVITATION] Envoi Email Craft pour {mask_email(email)}: {'OK' if email_res.get('success') else 'ECHEC'}")
 
         # Audit
         add_audit("CREATE", "invitation", f"Invitation envoyée à {email} (rôle {role})", inv_id)
