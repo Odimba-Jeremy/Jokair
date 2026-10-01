@@ -390,7 +390,11 @@ TABLES = {
 
     "tariff_history": "tariff_history",
 
-    "invoice_payments": "invoice_payments"
+    "invoice_payments": "invoice_payments",
+
+    "invitations": "invitations",
+
+    "settings": "system_settings"
 
 }
 
@@ -2022,6 +2026,8 @@ try:
 
     from .admin import register_admin_routes
 
+    from .invitations import register_invitations_routes
+
     from .pediatrics import register_pediatrics_routes
 
     from .ai import register_ai_routes
@@ -2053,6 +2059,8 @@ except ImportError:
     from medical import register_medical_routes
 
     from admin import register_admin_routes
+
+    from invitations import register_invitations_routes
 
     from pediatrics import register_pediatrics_routes
 
@@ -2117,6 +2125,8 @@ register_doctor_routes(app, runtime=globals())
 register_medical_routes(app, runtime=globals())
 
 register_admin_routes(app, runtime=globals())
+
+register_invitations_routes(app, runtime=globals())
 
 register_pediatrics_routes(app, runtime=globals())
 

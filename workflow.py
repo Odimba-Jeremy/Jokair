@@ -223,7 +223,8 @@ def register_workflow_routes(app, *, runtime):
         # (indispensable lors du suivi quotidien ou d'une correction par l'infirmier)
         
         # Garde-fous physiologiques (détection d'erreurs de frappe aberrantes)
-        temp_val = to_float(data.get("temperature"), 0)
+        raw_temp = data.get("temperature")
+        temp_val = to_float(raw_temp, 0) if raw_temp not in (None, "", "null") else 0
         if temp_val > 0 and (temp_val < 30.0 or temp_val > 45.0):
             return jsonify({"error": f"Température aberrante ({temp_val}°C). La valeur doit être comprise entre 30.0°C et 45.0°C"}), 422
         
@@ -243,7 +244,7 @@ def register_workflow_routes(app, *, runtime):
         
         payload = {
             "patient_id": patient_id,
-            "temperature": data.get("temperature"),
+            "temperature": to_float(data.get("temperature"), None) if data.get("temperature") not in (None, "", "null") else None,
             "blood_pressure": data.get("blood_pressure") or (
                 f"{data.get('blood_pressure_sys')}/{data.get('blood_pressure_dia')}"
                 if data.get("blood_pressure_sys") is not None and data.get("blood_pressure_dia") is not None else ""

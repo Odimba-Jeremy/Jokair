@@ -32,6 +32,13 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
 
     @auth.post("/api/auth/register")
     def register():
+        # Vérifier si les inscriptions publiques sont autorisées
+        is_reg_enabled_fn = app.config.get("IS_REGISTRATION_ENABLED_FN")
+        if is_reg_enabled_fn and not is_reg_enabled_fn():
+            return jsonify({
+                "error": "Les inscriptions publiques sont actuellement désactivées. Contactez l'administration pour recevoir une invitation."
+            }), 403
+
         data = fast_json()
         name = data.get("name", "").strip()
         email = data.get("email", "").lower().strip()
