@@ -162,22 +162,7 @@ app.config["JSON_AS_ASCII"] = False
 
 cache = Cache(app)
 
-_allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
-
-if _allowed_origins_env:
-    _allowed_origins = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
-    CORS(app, resources={r"/api/*": {
-        "origins": _allowed_origins,
-        "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True,
-    }})
-else:
-    CORS(app, resources={r"/api/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-    }})
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
 cached = cache.cached
 
