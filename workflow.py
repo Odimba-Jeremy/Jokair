@@ -368,15 +368,15 @@ def register_workflow_routes(app, *, runtime):
             box = box_check.data[0]
             if to_int(box.get("doctor_id")) != doctor_id:
                 return jsonify({"error": "Ce box n'est pas attribué au médecin sélectionné"}), 422
-            if box.get("status") != "free":
-                return jsonify({"error": "Ce box est déjà occupé"}), 422
-            supabase.table("medical_boxes").update({
-                "status": "occupied",
-                "patient_id": patient_id,
-                "patient_name": get_patient_map().get(patient_id, "Patient"),
-                "occupied_at": now_iso(),
-                "updated_at": now_iso()
-            }).eq("id", to_int(box_id)).execute()
+            # Permettre le dispatch multiple : le patient sera dans la file d'attente du médecin
+            if box.get("status") == "free":
+                supabase.table("medical_boxes").update({
+                    "status": "occupied",
+                    "patient_id": patient_id,
+                    "patient_name": get_patient_map().get(patient_id, "Patient"),
+                    "occupied_at": now_iso(),
+                    "updated_at": now_iso()
+                }).eq("id", to_int(box_id)).execute()
         
         payload = {
             "patient_id": patient_id,
@@ -996,11 +996,16 @@ def register_workflow_routes(app, *, runtime):
             if category:
                 query = query.eq("category", category)
             rows = query.order("category").execute().data or []
+            for r in rows:
+                amt = to_float(r.get("amount") or r.get("price_usd") or r.get("price"), 0)
+                r["amount"] = amt
+                r["price_usd"] = amt
             return jsonify(rows)
         data = fast_json()
         category = data.get("category", "").strip()
         label = data.get("label", "").strip()
-        amount = round(to_float(data.get("amount"), 0), 2)
+        code = str(data.get("code") or "").strip().upper()
+        amount = round(to_float(data.get("amount") or data.get("price_usd") or data.get("price"), 0), 2)
         if not category or not label or amount < 0:
             return jsonify({"error": "Categorie, libelle et montant requis"}), 422
         payload = {

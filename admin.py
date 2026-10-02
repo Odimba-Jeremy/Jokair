@@ -108,8 +108,8 @@ def register_admin_routes(app, *, runtime):
         invalidate_cache()
         return jsonify({k: v for k, v in result.data[0].items() if k != "password_hash"}), 201
 
-    @app.route("/api/users/<int:user_id>", methods=["PUT"])
-    @app.route("/api/auth/users/<int:user_id>", methods=["PUT"])
+    @app.route("/api/users/<int:user_id>", methods=["PUT", "PATCH"])
+    @app.route("/api/auth/users/<int:user_id>", methods=["PUT", "PATCH"])
     @roles_required("super_admin")
     def update_user(user_id: int):
         data = fast_json()
@@ -120,8 +120,12 @@ def register_admin_routes(app, *, runtime):
             updates["email"] = data["email"].lower().strip()
         if "role" in data and data["role"] in ROLES["staff"]:
             updates["role"] = data["role"]
+        if "photo_url" in data:
+            updates["photo_url"] = str(data["photo_url"]).strip()
         if "is_active" in data:
             updates["is_active"] = bool(data["is_active"])
+        if "status" in data:
+            updates["status"] = str(data["status"]).strip()
         if "password" in data and data["password"]:
             if len(data["password"]) >= 8:
                 updates["password_hash"] = generate_password_hash(data["password"])

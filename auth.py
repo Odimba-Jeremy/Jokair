@@ -21,9 +21,20 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
             return jsonify({"error": "Email et mot de passe requis"}), 422
         result = supabase.table(tables["users"]).select("*").eq("email", email).execute()
         user = result.data[0] if result.data else None
-        if not user or not check_password_hash(user.get("password_hash", ""), password):
+        try:
+            password_valid = bool(user) and check_password_hash(user.get("password_hash", ""), password)
+        except (ValueError, TypeError):
+            # Un hash mal enregistré ne doit jamais faire tomber l'endpoint
+            # de connexion. L'administrateur doit le corriger en base.
+            password_valid = False
+        if not password_valid:
             return jsonify({"error": "Email ou mot de passe incorrect"}), 401
         token = create_token(user)
+        # Mettre à jour last_login
+        try:
+            supabase.table(tables["users"]).update({"last_login": now_iso()}).eq("id", user["id"]).execute()
+        except Exception:
+            pass
         add_audit("LOGIN", "user", f"Connexion: {email}", user["id"])
         return jsonify({
             "user": {k: v for k, v in user.items() if k != "password_hash"},

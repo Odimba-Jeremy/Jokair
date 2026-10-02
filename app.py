@@ -6,14 +6,6 @@ import json
 
 import os
 
-# --- Chargement du fichier .env (nécessaire pour EMAIL_CRAFT_API_KEY) ---
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-    load_dotenv()
-except ImportError:
-    print("[WARN] python-dotenv absent : pip install python-dotenv")
-
 import re
 
 import secrets
@@ -170,7 +162,7 @@ app.config["JSON_AS_ASCII"] = False
 
 cache = Cache(app)
 
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 cached = cache.cached
 
@@ -205,6 +197,13 @@ def compress_and_measure_response(response):
         response.headers["Vary"] = "Accept-Encoding"
 
         response.headers["Content-Length"] = str(len(response.get_data()))
+
+    origin = request.headers.get("Origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
 
     return response
 
@@ -1124,7 +1123,7 @@ def roles_required(*allowed):
 
 
 
-def add_audit(action: str, entity: str, details: str = None, entity_id: int = None):
+def add_audit(action: str, entity: str, details: str = None, entity_id: int = None, **kwargs):
 
     try:
 
@@ -1139,6 +1138,10 @@ def add_audit(action: str, entity: str, details: str = None, entity_id: int = No
             "user_id": g.current_user.get("id") if hasattr(g, 'current_user') else None,
 
             "user_name": g.current_user.get("name") if hasattr(g, 'current_user') else "Systeme",
+
+            "user_role": g.current_user.get("role") if hasattr(g, 'current_user') else None,
+
+            "module": kwargs.get("module", entity),
 
             "details": details or "",
 

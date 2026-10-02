@@ -222,8 +222,16 @@ def register_patient_routes(
     @patients.get("/api/patients/<int:patient_id>/prescriptions")
     @roles_required(*roles["staff"])
     def get_patient_prescriptions(patient_id: int):
-        result = supabase.table(tables["prescriptions"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
-        return jsonify(result.data)
+        result = supabase.table(tables["prescriptions"]).select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+        try:
+            care_res = supabase.table("care_prescriptions").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute().data or []
+            for cp in care_res:
+                cp["product_name"] = cp.get("item_name") or cp.get("care_type") or "Soin"
+                cp["medication"] = cp["product_name"]
+            result.extend(care_res)
+        except Exception:
+            pass
+        return jsonify(result)
 
     @patients.get("/api/patients/<int:patient_id>/lab-results")
     @roles_required(*roles["staff"])
@@ -392,7 +400,7 @@ def register_patient_routes(
                 "qr_code": qr_code_url
             }, 200
 
-    @patients.route("/<int:patient_id>/full-record", methods=["GET"])
+    @patients.route("/api/patients/<int:patient_id>/full-record", methods=["GET"])
     @roles_required("super_admin", "admin", "docteur", "infirmier", "reception", "laboratoire", "pharmacie")
     def get_full_patient_record(patient_id: int):
         """Récupère l'intégralité du dossier médical d'un patient (authentifié)."""
@@ -401,7 +409,7 @@ def register_patient_routes(
             return jsonify({"error": "Patient introuvable"}), code
         return jsonify(data)
 
-    @patients.route("/<int:patient_id>/public-record", methods=["GET"])
+    @patients.route("/api/patients/<int:patient_id>/public-record", methods=["GET"])
     def get_public_patient_record(patient_id: int):
         """Accès public sécurisé pour le scan QR Code de la fiche patient sans authentification."""
         data, code = _fetch_complete_patient_record(patient_id)

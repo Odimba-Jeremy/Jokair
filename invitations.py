@@ -16,14 +16,6 @@ from typing import Any, Dict, Optional, Tuple
 from flask import Blueprint, request, jsonify, g
 from werkzeug.security import generate_password_hash
 
-# Chargement du .env (sécurité si app.py ne l'a pas fait)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-    load_dotenv()
-except ImportError:
-    pass
-
 
 # ==================== HELPERS UTILITAIRES ====================
 
@@ -53,10 +45,8 @@ def send_invitation_email(
     - Timeout réseau de 10 secondes.
     - Retourne un résultat structuré {'success': bool, 'status_code': int, 'error': str|None}.
     """
-    email_craft_url = (os.getenv("EMAIL_CRAFT_URL") or "https://email-craft-90.lovable.app/api/public/v1/send").strip().strip('"').strip("'").rstrip("/")
-    api_key = (os.getenv("EMAIL_CRAFT_API_KEY") or "").strip().strip('"').strip("'")
-    if api_key.lower().startswith("bearer "):
-        api_key = api_key[7:].strip()
+    email_craft_url = os.getenv("EMAIL_CRAFT_URL", "https://email-craft-90.lovable.app/api/public/v1/send")
+    api_key = os.getenv("EMAIL_CRAFT_API_KEY", "")
 
     if not api_key:
         print(f"[WARN] EMAIL_CRAFT_API_KEY non configurée pour l'envoi d'e-mail à {mask_email(to_email)}")
@@ -89,25 +79,10 @@ def send_invitation_email(
         f"L'équipe I-HUB"
     )
 
-    import html as _html
-    _msg_html = (f'<p style="background:#f1f5f9;border-left:4px solid #2563eb;padding:12px;color:#334155;">'
-                 f'{_html.escape(custom_message)}</p>') if custom_message else ""
-    _url = _html.escape(invite_url, quote=True)
-    html_content = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;">
-  <h2 style="color:#0f172a;margin-top:0;">Invitation à rejoindre I-HUB</h2>
-  <p style="color:#334155;font-size:15px;line-height:1.5;">Bonjour,<br><br>
-  <strong>{_html.escape(inviter_name)}</strong> vous invite à rejoindre la plateforme médicale I-HUB avec le rôle : <strong>{_html.escape(role_label)}</strong>.</p>
-  {_msg_html}
-  <p style="text-align:center;margin:28px 0;"><a href="{_url}" style="background:#2563eb;color:#ffffff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">Activer mon compte</a></p>
-  <p style="color:#64748b;font-size:13px;">Lien valable 48 heures. Si le bouton ne fonctionne pas :<br><a href="{_url}" style="color:#2563eb;word-break:break-all;">{_url}</a></p>
-  <p style="color:#94a3b8;font-size:12px;">Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail.</p>
-</div>"""
-
     payload = {
         "to": to_email,
         "subject": "Invitation à rejoindre I-HUB",
         "text": text_content,
-        "html": html_content,
         "from_name": "I-HUB"
     }
     headers = {
@@ -116,9 +91,7 @@ def send_invitation_email(
     }
 
     try:
-        print(f"[EMAIL CRAFT] Envoi vers {email_craft_url} pour {mask_email(to_email)} (clé {api_key[:5]}...)")
         resp = requests.post(email_craft_url, json=payload, headers=headers, timeout=10)
-        print(f"[EMAIL CRAFT] Réponse HTTP {resp.status_code}")
         # Succès attendu : HTTP 202 (ou 200/201)
         if resp.status_code in (200, 201, 202):
             return {"success": True, "status_code": resp.status_code, "error": None}
