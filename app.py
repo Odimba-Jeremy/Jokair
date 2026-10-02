@@ -6,6 +6,14 @@ import json
 
 import os
 
+# --- Chargement du fichier .env (nécessaire pour EMAIL_CRAFT_API_KEY) ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    load_dotenv()
+except ImportError:
+    print("[WARN] python-dotenv absent : pip install python-dotenv")
+
 import re
 
 import secrets
