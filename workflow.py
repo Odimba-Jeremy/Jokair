@@ -786,17 +786,33 @@ def register_workflow_routes(app, *, runtime):
                 return jsonify({"error": "Ce lit est déjà occupé"}), 422
             if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
                 return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
+            room_price = to_float(room.get("price_per_day") or room.get("daily_rate") or room.get("price") or get_tariff_amount("hospitalisation", "Hospitalisation", 15.0))
             data = {
                 **data,
-                "room": room.get("room_number"),
+                "room": room.get("room_number") or room.get("name") or str(room_id),
                 "room_id": room_id,
                 "bed": str(requested_bed),
                 "bed_id": to_int(requested_bed, 1),
+                "daily_rate": room_price,
                 "status": "admitted",
                 "admission_date": data.get("admission_date") or now_iso(),
                 "admitted_by": g.current_user["id"],
                 "admitted_by_name": g.current_user["name"]
             }
+            # Facturation automatique du 1er jour sur le compte patient
+            try:
+                add_patient_account_line(
+                    patient_id=current.get("patient_id"),
+                    category="hospitalisation",
+                    description=f"Hospitalisation: Sejour Jour 1 (Chambre {room.get('room_number') or room.get('name') or room_id}, Lit {requested_bed})",
+                    amount=room_price,
+                    source="hospitalization_daily",
+                    source_id=hosp_id,
+                    quantity=1,
+                    unit_price=room_price
+                )
+            except Exception as _hosp_bill_err:
+                print(f"[HOSPITALIZATION] Erreur cotation directe jour 1: {_hosp_bill_err}")
             supabase.table(TABLES["patients"]).update({
                 "status": "admitted",
                 "room_number": room.get("room_number"),
@@ -1009,6 +1025,7 @@ def register_workflow_routes(app, *, runtime):
         if not category or not label or amount < 0:
             return jsonify({"error": "Categorie, libelle et montant requis"}), 422
         payload = {
+            "code": code,
             "category": category,
             "label": label,
             "amount": amount,
@@ -1020,17 +1037,22 @@ def register_workflow_routes(app, *, runtime):
         }
         result = compatible_insert(TABLES["tariffs"], payload)
         tariff = result.data[0] if result.data else payload
-        compatible_insert(TABLES["tariff_history"], {
-            "tariff_id": tariff.get("id"),
-            "category": category,
-            "label": label,
-            "old_amount": 0,
-            "new_amount": amount,
-            "action": "CREATE",
-            "created_by": g.current_user["id"],
-            "created_by_name": g.current_user["name"],
-            "created_at": now_iso()
-        })
+        # L'historique est utile, mais ne doit jamais empêcher l'administration
+        # de créer un tarif si la table tariff_history n'est pas encore migrée.
+        try:
+            compatible_insert(TABLES["tariff_history"], {
+                "tariff_id": tariff.get("id"),
+                "category": category,
+                "label": label,
+                "old_amount": 0,
+                "new_amount": amount,
+                "action": "CREATE",
+                "created_by": g.current_user["id"],
+                "created_by_name": g.current_user["name"],
+                "created_at": now_iso()
+            })
+        except Exception as exc:
+            print(f"[TARIFF_HISTORY] Historique non enregistré: {exc}")
         add_audit("CREATE", "tariff", f"Tarif {category}: {label} = {amount}", tariff.get("id"))
         invalidate_cache()
         return jsonify(tariff), 201
@@ -1044,6 +1066,7 @@ def register_workflow_routes(app, *, runtime):
             return jsonify({"error": "Tarif introuvable"}), 404
         current = existing[0]
         updates = {
+            "code": str(data.get("code", current.get("code") or "")).strip().upper(),
             "category": data.get("category", current.get("category")),
             "label": data.get("label", current.get("label")),
             "amount": round(to_float(data.get("amount"), current.get("amount")), 2),
@@ -1051,17 +1074,20 @@ def register_workflow_routes(app, *, runtime):
             "updated_at": now_iso()
         }
         result = compatible_update(TABLES["tariffs"], updates, "id", tariff_id)
-        compatible_insert(TABLES["tariff_history"], {
-            "tariff_id": tariff_id,
-            "category": updates["category"],
-            "label": updates["label"],
-            "old_amount": to_float(current.get("amount"), 0),
-            "new_amount": updates["amount"],
-            "action": "UPDATE",
-            "created_by": g.current_user["id"],
-            "created_by_name": g.current_user["name"],
-            "created_at": now_iso()
-        })
+        try:
+            compatible_insert(TABLES["tariff_history"], {
+                "tariff_id": tariff_id,
+                "category": updates["category"],
+                "label": updates["label"],
+                "old_amount": to_float(current.get("amount"), 0),
+                "new_amount": updates["amount"],
+                "action": "UPDATE",
+                "created_by": g.current_user["id"],
+                "created_by_name": g.current_user["name"],
+                "created_at": now_iso()
+            })
+        except Exception as exc:
+            print(f"[TARIFF_HISTORY] Historique non enregistré: {exc}")
         add_audit("UPDATE", "tariff", f"Tarif #{tariff_id} modifie", tariff_id)
         invalidate_cache()
         return jsonify(result.data[0] if result.data else updates)

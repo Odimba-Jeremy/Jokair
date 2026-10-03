@@ -193,9 +193,11 @@ def register_billing_routes(app, *, runtime):
 
 
     @billing.route("/api/tariffs", methods=["GET", "POST"])
-    @roles_required("super_admin")
+    @roles_required("super_admin", "reception")
 
     def tariffs_compat():
+        if request.method != "GET" and g.current_user.get("role") != "super_admin":
+            return jsonify({"error": "Modification de la grille réservée à l'administration"}), 403
         return workflow_tariffs.__wrapped__()
 
     @billing.route("/api/tariffs/<int:tariff_id>", methods=["PUT", "DELETE"])
@@ -227,6 +229,7 @@ def register_billing_routes(app, *, runtime):
         if amount < 0:
             return jsonify({"error": "Montant invalide"}), 422
         updates = {
+            "code": str(data.get("code", current.get("code") or "")).strip().upper(),
             "category": str(data.get("category", current.get("category") or "")).strip(),
             "label": str(data.get("label", current.get("label") or "")).strip(),
             "amount": amount,
@@ -2368,11 +2371,13 @@ def register_billing_routes(app, *, runtime):
         try:
             existing = supabase.table("cash_closures").select("id").eq("closure_date", target_date).limit(1).execute().data or []
             if existing:
-                return jsonify({"error": f"La caisse du {target_date} est déjà clôturée"}), 409
-            res = compatible_insert("cash_closures", closure_payload)
-            if not res.data:
-                return jsonify({"error": "La clôture n'a pas pu être enregistrée"}), 500
-            created = res.data[0]
+                res = supabase.table("cash_closures").update(closure_payload).eq("id", existing[0]["id"]).execute()
+                created = res.data[0] if (res and res.data) else {**closure_payload, "id": existing[0]["id"]}
+            else:
+                res = compatible_insert("cash_closures", closure_payload)
+                if not res.data:
+                    return jsonify({"error": "La cloture n'a pas pu etre enregistree"}), 500
+                created = res.data[0]
         except Exception as exc:
             # Ne jamais afficher une fausse réussite : la réception doit savoir
             # qu'une migration manquante ou une panne empêche la clôture.

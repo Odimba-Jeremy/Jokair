@@ -8,6 +8,35 @@ import uuid
 def register_maternity_routes(app, *, runtime):
     globals().update(runtime)
     maternity = Blueprint("maternity", __name__)
+    VACCINE_CATALOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "vaccine_catalog.json")
+
+    def get_vaccine_catalog_from_store():
+        """Charge le catalogue dynamique des vaccins (aucun vaccin en dur)."""
+        catalog = []
+        if os.path.exists(VACCINE_CATALOG_FILE):
+            try:
+                with open(VACCINE_CATALOG_FILE, "r", encoding="utf-8") as cf:
+                    catalog = json.load(cf) or []
+            except Exception:
+                catalog = []
+        try:
+            db_rows = supabase.table("vaccine_catalog").select("*").execute().data or []
+            db_codes = {str(r.get("code")).upper() for r in db_rows if r.get("code")}
+            for r in db_rows:
+                if r.get("code") and str(r.get("code")).upper() not in {str(c.get("code")).upper() for c in catalog}:
+                    catalog.append(r)
+        except Exception:
+            pass
+        return catalog
+
+    def save_vaccine_catalog_to_store(catalog):
+        try:
+            os.makedirs(os.path.dirname(VACCINE_CATALOG_FILE), exist_ok=True)
+            with open(VACCINE_CATALOG_FILE, "w", encoding="utf-8") as cf:
+                json.dump(catalog, cf, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("Error saving vaccine catalog:", e)
+
 
     NEWBORN_VACCINES = (("BCG", "BCG"), ("VPO0", "VPO 0"), ("HEPB0", "Hépatite B — naissance"))
     # Catalogue vaccinal standard étendu (PEV élargi)
@@ -34,13 +63,35 @@ def register_maternity_routes(app, *, runtime):
 
 
     def newborn_vaccine_plan(baby_patient_id):
-        """Calendrier fixe, enrichi uniquement des doses effectivement réalisées."""
+        """Doses de vaccins pour un enfant (doses realisees + catalogue dynamique cree par les infirmiers)."""
         try:
             rows = supabase.table("newborn_vaccinations").select("*").eq("baby_patient_id", baby_patient_id).execute().data or []
         except Exception:
             rows = []
-        done = {str(row.get("vaccine_code")): row for row in rows}
-        return [{"code": code, "name": name, "status": "completed" if code in done else "planned", "record": done.get(code)} for code, name in NEWBORN_VACCINES]
+        done = {str(row.get("vaccine_code")).upper(): row for row in rows}
+        catalog = get_vaccine_catalog_from_store()
+        plan = []
+        for vac in catalog:
+            vcode = str(vac.get("code")).upper()
+            vname = vac.get("name") or vcode
+            is_done = vcode in done
+            plan.append({
+                "code": vcode,
+                "name": vname,
+                "status": "completed" if is_done else "planned",
+                "target_age_months": vac.get("target_age_months", 0),
+                "target_age_label": vac.get("target_age_label", ""),
+                "record": done.get(vcode)
+            })
+        for vcode, rec in done.items():
+            if not any(p["code"] == vcode for p in plan):
+                plan.append({
+                    "code": vcode,
+                    "name": rec.get("vaccine_name") or vcode,
+                    "status": "completed",
+                    "record": rec
+                })
+        return plan
 
     def pregnancy_timeline(last_menstrual_period):
         """Retourne une DDR normalisée et les valeurs obstétricales calculées."""
@@ -475,24 +526,27 @@ def register_maternity_routes(app, *, runtime):
     @maternity.route("/api/maternity/newborns/<int:baby_id>/vaccines/<vaccine_code>/administer", methods=["POST"])
     @roles_required("super_admin", "infirmier")
     def administer_newborn_vaccine(baby_id, vaccine_code):
-        vaccine = next(((code, name) for code, name in NEWBORN_VACCINES if code == vaccine_code), None)
-        if not vaccine:
-            return jsonify({"error": "Vaccin inconnu"}), 422
-        baby = supabase.table(TABLES["patients"]).select("id,is_newborn").eq("id", baby_id).execute().data or []
-        if not baby or not baby[0].get("is_newborn"):
-            return jsonify({"error": "Nouveau-né introuvable"}), 404
+        catalog = get_vaccine_catalog_from_store()
+        catalog_item = next((v for v in catalog if str(v.get("code")).upper() == str(vaccine_code).upper()), None)
+        body = fast_json() or {}
+        vaccine_name = body.get("vaccine_name") or (catalog_item.get("name") if catalog_item else None) or vaccine_code
+        
+        baby = supabase.table(TABLES["patients"]).select("id,is_newborn,full_name").eq("id", baby_id).execute().data or []
+        if not baby:
+            return jsonify({"error": "Patient introuvable"}), 404
         existing = supabase.table("newborn_vaccinations").select("id").eq("baby_patient_id", baby_id).eq("vaccine_code", vaccine_code).execute().data or []
         if existing:
-            return jsonify({"error": "Ce vaccin a déjà été effectué et est verrouillé"}), 409
+            return jsonify({"error": "Ce vaccin a deja ete effectue et est verrouille"}), 409
         done_at = now_iso()
         result = compatible_insert("newborn_vaccinations", {
-            "baby_patient_id": baby_id, "vaccine_code": vaccine[0], "vaccine_name": vaccine[1], "status": "completed",
+            "baby_patient_id": baby_id, "vaccine_code": vaccine_code, "vaccine_name": vaccine_name, "status": "completed",
             "administered_at": done_at, "administered_by": g.current_user["id"], "administered_by_name": g.current_user["name"],
             "created_at": done_at, "updated_at": done_at,
         })
-        add_audit("CREATE", "newborn_vaccination", f"{vaccine[1]} — bébé #{baby_id}", baby_id)
+        baby_name = baby[0].get("full_name") or f"Patient #{baby_id}"
+        add_audit("CREATE", "newborn_vaccination", f"{vaccine_name} a {baby_name}", baby_id)
         invalidate_cache()
-        return jsonify(result.data[0] if result.data else {"vaccine_code": vaccine_code, "status": "completed"}), 201
+        return jsonify(result.data[0] if result.data else {"vaccine_code": vaccine_code, "vaccine_name": vaccine_name, "status": "completed"}), 201
 
     @maternity.route("/api/maternity/deliveries/<int:delivery_id>", methods=["GET"])
     @roles_required("super_admin", "infirmier", "docteur", "reception")
@@ -586,19 +640,10 @@ def register_maternity_routes(app, *, runtime):
     @roles_required("super_admin", "infirmier", "docteur")
     def maternity_vaccine_catalog():
         if request.method == "GET":
-            # Si table en base disponible, fusionner avec DEFAULT_VACCINE_CATALOG
-            try:
-                rows = supabase.table("vaccine_catalog").select("*").execute().data or []
-            except Exception:
-                rows = []
-            codes_in_db = {r.get("code") for r in rows}
-            combined = list(rows)
-            for v in DEFAULT_VACCINE_CATALOG:
-                if v["code"] not in codes_in_db:
-                    combined.append(v)
-            return jsonify(combined)
+            # Aucun vaccin en dur : uniquement ceux crees et geres par les infirmiers
+            return jsonify(get_vaccine_catalog_from_store())
         
-        # POST - Ajouter un vaccin au catalogue
+        # POST - Creer un vaccin dynamiquement
         data = fast_json()
         code = str(data.get("code") or "").strip().upper()
         name = str(data.get("name") or "").strip()
@@ -607,18 +652,44 @@ def register_maternity_routes(app, *, runtime):
         if not code or not name:
             return jsonify({"error": "Code et nom de vaccin requis"}), 422
         
+        user_name = g.current_user.get("name") if hasattr(g, "current_user") and g.current_user else "Infirmier"
         new_item = {
             "code": code,
             "name": name,
             "target_age_months": target_age,
             "target_age_label": label,
+            "created_by": user_name,
             "created_at": now_iso()
         }
+        catalog = get_vaccine_catalog_from_store()
+        catalog = [c for c in catalog if str(c.get("code")).upper() != code]
+        catalog.append(new_item)
+        save_vaccine_catalog_to_store(catalog)
         try:
             compatible_insert("vaccine_catalog", new_item)
         except Exception:
             pass
+        add_audit("CREATE", "vaccine_catalog", f"Vaccin {name} ({code}) cree par {user_name}")
+        invalidate_cache()
         return jsonify(new_item), 201
+
+    @maternity.route("/api/maternity/vaccine-catalog/<vaccine_code>", methods=["DELETE"])
+    @roles_required("super_admin", "infirmier")
+    def delete_maternity_vaccine_catalog(vaccine_code):
+        code = str(vaccine_code).strip().upper()
+        catalog = get_vaccine_catalog_from_store()
+        initial_len = len(catalog)
+        catalog = [c for c in catalog if str(c.get("code")).upper() != code]
+        if len(catalog) < initial_len:
+            save_vaccine_catalog_to_store(catalog)
+            try:
+                supabase.table("vaccine_catalog").delete().eq("code", code).execute()
+            except Exception:
+                pass
+            add_audit("DELETE", "vaccine_catalog", f"Vaccin {code} supprime")
+            invalidate_cache()
+            return jsonify({"success": True, "message": f"Vaccin {code} supprime"})
+        return jsonify({"error": "Vaccin introuvable"}), 404
 
     @maternity.route("/api/maternity/children", methods=["POST"])
     @roles_required("super_admin", "infirmier")
