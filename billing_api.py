@@ -194,11 +194,49 @@ def register_billing_routes(app, *, runtime):
 
     @billing.route("/api/tariffs", methods=["GET", "POST"])
     @roles_required("super_admin", "reception")
-
     def tariffs_compat():
-        if request.method != "GET" and g.current_user.get("role") != "super_admin":
-            return jsonify({"error": "Modification de la grille réservée à l'administration"}), 403
-        return workflow_tariffs.__wrapped__()
+        if request.method == "GET":
+            category = request.args.get("category")
+            query = supabase.table(TABLES["tariffs"]).select("*")
+            if category:
+                query = query.eq("category", category)
+            rows = query.order("category").execute().data or []
+            for r in rows:
+                amt = to_float(r.get("amount") or r.get("price_usd") or r.get("price"), 0)
+                r["amount"] = amt
+                r["price_usd"] = amt
+            return jsonify(rows)
+
+        # POST - creation (admin seulement)
+        if g.current_user.get("role") != "super_admin":
+            return jsonify({"error": "Modification reservee a l'administration"}), 403
+        data = fast_json()
+        category = str(data.get("category", "")).strip()
+        label = str(data.get("label", "")).strip()
+        code = str(data.get("code") or "").strip().upper()
+        amount = round(to_float(data.get("amount") or data.get("price_usd") or data.get("price"), 0), 2)
+        if not category or not label or amount < 0:
+            return jsonify({"error": "Categorie, libelle et montant requis"}), 422
+        payload = {
+            "code": code, "category": category, "label": label, "amount": amount,
+            "is_active": data.get("is_active", True),
+            "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
+            "created_at": now_iso(), "updated_at": now_iso()
+        }
+        result = compatible_insert(TABLES["tariffs"], payload)
+        tariff = result.data[0] if result.data else payload
+        try:
+            compatible_insert(TABLES["tariff_history"], {
+                "tariff_id": tariff.get("id"), "category": category, "label": label,
+                "old_amount": 0, "new_amount": amount, "action": "CREATE",
+                "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
+                "created_at": now_iso()
+            })
+        except Exception:
+            pass
+        add_audit("CREATE", "tariff", f"Tarif {category}: {label} = {amount}", tariff.get("id"))
+        invalidate_cache()
+        return jsonify(tariff), 201
 
     @billing.route("/api/tariffs/<int:tariff_id>", methods=["PUT", "DELETE"])
     @roles_required("super_admin")
