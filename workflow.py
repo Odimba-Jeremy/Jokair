@@ -442,7 +442,7 @@ def register_workflow_routes(app, *, runtime):
         return jsonify(rows)
 
     @workflow.route("/api/workflow/consultations", methods=["GET", "POST"])
-    @roles_required("super_admin", "docteur")
+    @roles_required("super_admin", "docteur", "reception")
     def workflow_consultations():
         if request.method == "GET":
             patient_id = request.args.get("patient_id")
@@ -456,6 +456,8 @@ def register_workflow_routes(app, *, runtime):
             for row in rows:
                 row["patient_name"] = patients.get(row.get("patient_id"), "Inconnu")
             return jsonify(rows)
+        if g.current_user.get("role") == "reception":
+            return jsonify({"error": "La réception peut consulter les bulletins mais ne peut pas créer une consultation"}), 403
         data = fast_json()
         patient_id = to_int(data.get("patient_id"))
         if not patient_id:
