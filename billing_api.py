@@ -623,6 +623,15 @@ def register_billing_routes(app, *, runtime):
 
             return jsonify({"error": "Aucun article à facturer"}), 422
 
+        batch_key = str(data.get("idempotency_key") or data.get("uid") or "").strip()
+        if not batch_key:
+            return jsonify({"error": "Clé d'idempotence requise pour la facture groupée"}), 422
+        previous = supabase.table(TABLES["billing"]).select("*").eq("patient_id", to_int(data.get("patient_id"))).ilike(
+            "description", f"%[idemp:{batch_key}]%"
+        ).execute().data or []
+        if previous:
+            return jsonify({"invoice": previous[0], "idempotent": True}), 200
+
         normalized_items = []
 
         total_usd = 0.0
@@ -671,6 +680,39 @@ def register_billing_routes(app, *, runtime):
 
             return jsonify({"error": "Montant invalide"}), 422
 
+        # Les ventes pharmacie à crédit vont exclusivement dans le compte
+        # patient. Une facture officielle ne sera créée qu'au règlement du
+        # compte, ce qui supprime les doublons de factures impayées.
+        if data.get("source") == "pharmacy" and data.get("status", "unpaid") != "paid":
+            prior_lines = supabase.table("patient_account_lines").select("id").eq(
+                "patient_id", to_int(data.get("patient_id"))
+            ).ilike("description", f"%[idemp:{batch_key}-0]%").execute().data or []
+            if prior_lines:
+                return jsonify({"invoice": None, "idempotent": True, "message": "Vente déjà enregistrée"}), 200
+            for index, item in enumerate(normalized_items):
+                med_id = to_int(item.get("medication_id"), 0)
+                qty = to_int(item.get("quantity"), 0)
+                current = supabase.table(TABLES["pharmacy"]).select("quantity").eq("id", med_id).execute().data or []
+                if not med_id or qty <= 0 or not current or to_int(current[0].get("quantity"), 0) < qty:
+                    return jsonify({"error": f"Stock insuffisant pour {item.get('description') or 'le médicament'}"}), 422
+                add_patient_account_line(
+                    to_int(data.get("patient_id")), "medicament", item.get("description", "Produit pharmacie"),
+                    item.get("amount"), "pharmacy_invoice", None, qty, item.get("unit_price"),
+                    f"{batch_key}-{index}", item.get("currency") or item.get("price_currency") or "FC"
+                )
+                supabase.table(TABLES["pharmacy"]).update({
+                    "quantity": to_int(current[0].get("quantity"), 0) - qty, "updated_at": now_iso()
+                }).eq("id", med_id).execute()
+                compatible_insert("pharmacy_movements", {
+                    "medication_id": med_id, "medication_name": item.get("description", ""),
+                    "type": "sortie", "quantity": qty,
+                    "reason": f"Vente compte patient [idemp:{batch_key}]", "patient_id": data.get("patient_id"),
+                    "created_by": g.current_user["id"], "created_by_name": g.current_user["name"], "created_at": now_iso()
+                })
+            add_audit("CREATE", "pharmacy_account", f"Vente pharmacie ajoutée au compte patient #{data.get('patient_id')}", to_int(data.get("patient_id")))
+            invalidate_cache()
+            return jsonify({"invoice": None, "message": "Vente ajoutée au compte patient"}), 201
+
         invoice = {
 
             "invoice_number": f"FAC-{int(time.time())}-{secrets.token_hex(2).upper()}",
@@ -685,7 +727,7 @@ def register_billing_routes(app, *, runtime):
 
             "exchange_rate": rate,
 
-            "description": data.get("description", "Facture groupée"),
+            "description": f"{data.get('description', 'Facture groupée')} [idemp:{batch_key}]",
 
             "status": data.get("status", "unpaid"),
 
@@ -719,7 +761,7 @@ def register_billing_routes(app, *, runtime):
 
         if data.get("source") == "pharmacy":
 
-            for item in normalized_items:
+            for index, item in enumerate(normalized_items):
 
                 med_id = to_int(item.get("medication_id"), 0)
 
@@ -743,7 +785,7 @@ def register_billing_routes(app, *, runtime):
 
                     item.get("unit_price"),
 
-                    None,
+                    f"{batch_key}-{index}",
 
                     item.get("currency") or item.get("price_currency") or "FC"
 
@@ -1310,7 +1352,7 @@ def register_billing_routes(app, *, runtime):
 
         # Source de vérité financière : Lignes facturées - Transactions payées
 
-        lines = supabase.table("patient_account_lines").select("patient_id, amount").execute().data or []
+        lines = supabase.table("patient_account_lines").select("patient_id, amount, status").execute().data or []
 
         transactions = supabase.table("patient_account_transactions").select("patient_id, amount, type").execute().data or []
 
@@ -1322,7 +1364,7 @@ def register_billing_routes(app, *, runtime):
 
             pid = l.get("patient_id")
 
-            if pid:
+            if pid and str(l.get("status") or "").lower() != "cancelled":
 
                 patient_totals[pid] = patient_totals.get(pid, 0.0) + to_float(l.get("amount"), 0)
 
@@ -1484,7 +1526,10 @@ def register_billing_routes(app, *, runtime):
 
         # Calcul robuste
 
-        total_facture = round(sum(to_float(l.get("amount"), 0) for l in lines), 2)
+        total_facture = round(sum(
+            to_float(l.get("amount"), 0)
+            for l in lines if str(l.get("status") or "").lower() != "cancelled"
+        ), 2)
 
         
 

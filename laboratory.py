@@ -89,10 +89,11 @@ def register_laboratory_routes(app, *, runtime):
         }
         result = compatible_insert(TABLES["lab_tests"], test)
         lab_fee = to_float(data.get("amount"), get_tariff_amount("analyse", data.get("test_type", ""), 0))
+        # L'analyse est débitée au compte patient. La facture officielle est
+        # créée uniquement au règlement du compte, jamais à la prescription.
         invoice = None
         if lab_fee > 0:
-            line = add_patient_account_line(to_int(data.get("patient_id")), "analyse", f"Analyse: {data.get('test_type')}", lab_fee, "lab_test", result.data[0].get("id"))
-            invoice = create_service_invoice(to_int(data.get("patient_id")), f"Analyse: {data.get('test_type')}", lab_fee, "lab_test", result.data[0].get("id"), line)
+            add_patient_account_line(to_int(data.get("patient_id")), "analyse", f"Analyse: {data.get('test_type')}", lab_fee, "lab_test", result.data[0].get("id"))
         add_audit("CREATE", "lab_test", f"Analyse #{result.data[0]['id']}", result.data[0]["id"])
         invalidate_cache()
         response = dict(result.data[0])

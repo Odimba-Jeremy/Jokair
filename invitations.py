@@ -366,6 +366,78 @@ class InvitationsStore:
                 print(f"[INFO] Upsert system_settings Supabase indisponible: {e}")
 
 
+
+    DEFAULT_HOSPITAL_INFO = {
+        "name": "I Hub",
+        "subtitle": "HOPITAL GENERAL",
+        "phone": "+243 974 336 700",
+        "email": "jeremyodimba322@gmail.com",
+        "address": "Kinshasa, RDC",
+        "logo": "logo.jpg"
+    }
+
+    def get_hospital_settings(self) -> dict:
+        info = dict(self.DEFAULT_HOSPITAL_INFO)
+        if self._supabase_settings_ok:
+            try:
+                res = self.supabase.table("system_settings").select("value").eq("key", "hospital_info").execute()
+                if res.data and isinstance(res.data[0].get("value"), dict):
+                    info.update(res.data[0]["value"])
+                    return info
+            except Exception as e:
+                self._supabase_settings_ok = False
+                print(f"[INFO] system_settings Supabase non accessible pour hospital_info: {e}")
+
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data.get("hospital_info"), dict):
+                        info.update(data["hospital_info"])
+            except Exception:
+                pass
+        return info
+
+    def set_hospital_settings(self, new_info: dict, user_id=None, user_name=None) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        current = self.get_hospital_settings()
+        for k in ["name", "subtitle", "phone", "email", "address", "logo"]:
+            if k in new_info and new_info[k] is not None:
+                current[k] = str(new_info[k]).strip() if k != "logo" else str(new_info[k])
+
+        data = {}
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data["hospital_info"] = current
+        data["hospital_info_updated_at"] = now
+        data["hospital_info_updated_by"] = user_id
+        data["hospital_info_updated_by_name"] = user_name
+        try:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[ERROR] Ecriture settings hospital_info local: {e}")
+
+        if self._supabase_settings_ok:
+            try:
+                self.supabase.table("system_settings").upsert({
+                    "key": "hospital_info",
+                    "value": current,
+                    "updated_at": now,
+                    "updated_by": user_id,
+                    "updated_by_name": user_name
+                }).execute()
+            except Exception as e:
+                self._supabase_settings_ok = False
+                print(f"[INFO] Upsert hospital_info Supabase indisponible: {e}")
+
+        return current
+
+
 # ==================== ENREGISTREMENT DES ROUTES ====================
 
 def register_invitations_routes(app, *, runtime: dict):
@@ -714,5 +786,41 @@ def register_invitations_routes(app, *, runtime: dict):
         invalidate_cache()
 
         return jsonify({"enabled": enabled, "message": f"Inscriptions publiques {status_text}"})
+
+    
+    token_required = runtime.get("token_required", lambda f: f)
+
+    # -------------------------------------------------------------
+    # 9. GET /api/settings/hospital (public / tous utilisateurs)
+    # -------------------------------------------------------------
+    @app.route("/api/settings/hospital", methods=["GET"])
+    def get_hospital_settings_route():
+        settings = store.get_hospital_settings()
+        return jsonify(settings), 200
+
+    # -------------------------------------------------------------
+    # 10. PUT / POST / PATCH /api/settings/hospital (admin, super_admin)
+    # -------------------------------------------------------------
+    @app.route("/api/settings/hospital", methods=["PUT", "POST", "PATCH"])
+    @token_required
+    @roles_required("super_admin", "admin")
+    def update_hospital_settings_route():
+        data = fast_json()
+        if not data or not isinstance(data, dict):
+            return jsonify({"error": "Donnees invalides"}), 400
+
+        user_id = g.current_user.get("id") if hasattr(g, "current_user") and g.current_user else None
+        user_name = g.current_user.get("name", "Administrateur") if hasattr(g, "current_user") and g.current_user else "Administrateur"
+
+        updated = store.set_hospital_settings(data, user_id=user_id, user_name=user_name)
+        hospital_name = updated.get("name", "Hopital")
+
+        add_audit("UPDATE", "settings", f"Parametres hopital modifies: {hospital_name}", 0)
+        invalidate_cache()
+
+        return jsonify({
+            "message": "Parametres de l'hopital mis a jour avec succes",
+            "settings": updated
+        }), 200
 
     app.register_blueprint(inv_bp)

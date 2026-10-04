@@ -333,7 +333,14 @@ def register_maternity_routes(app, *, runtime):
         res_row = result.data[0] if (result and result.data) else consultation
         if not res_row.get("visit_number"):
             res_row["visit_number"] = visit_num
-        facture_auto(patient_id, "CPN", 1, "prenatal", res_row.get("id"))
+        # Une CPN alimente le compte patient; la facture imprimable est créée
+        # au paiement afin d'éviter une facture impayée doublée.
+        cpn_fee = get_tariff_amount("maternite", "CPN", 0)
+        if cpn_fee > 0:
+            add_patient_account_line(
+                patient_id, "maternite", f"Consultation prénatale CPN {visit_num}",
+                cpn_fee, "prenatal", res_row.get("id"), 1, cpn_fee
+            )
         add_audit("CREATE", "prenatal", f"Consultation prénatale #{res_row.get('id')}", res_row.get("id"))
         invalidate_cache()
         return jsonify(res_row), 201
@@ -437,6 +444,14 @@ def register_maternity_routes(app, *, runtime):
         }
         result = compatible_insert("deliveries", delivery)
         created_delivery = result.data[0] if result.data else delivery
+        # Débit unique de l'accouchement selon la grille active.
+        delivery_label = "Césarienne" if str(delivery_type).lower() in ("cesarienne", "césarienne", "cesarean") else "Accouchement eutocique"
+        delivery_fee = get_tariff_amount("maternite", delivery_label, 0)
+        if delivery_fee > 0 and created_delivery.get("id"):
+            add_patient_account_line(
+                patient_id, "maternite", delivery_label, delivery_fee,
+                "delivery", created_delivery.get("id"), 1, delivery_fee
+            )
         baby = (data.get("babies") or [{}])[0] or {}
         baby_name = f"Enfant de {mother.get('full_name') or 'la mère'}"
         baby_patient = {

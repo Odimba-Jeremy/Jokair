@@ -34,7 +34,7 @@ def register_pharmacy_routes(app, *, runtime):
         low_stock = request.args.get("low_stock", "false").lower() == "true"
         result = supabase.table(TABLES["pharmacy"]).select("*").order("medication_name").execute()
         items = result.data or []
-        for item in items:
+        for index, item in enumerate(items):
             if not item.get("category"):
                 item["category"] = infer_pharmacy_category(item)
         if low_stock:
@@ -190,6 +190,16 @@ def register_pharmacy_routes(app, *, runtime):
         unit_price = to_float(data.get("unit_price"), item.get("selling_price", 0))
         total_amount = round(quantity * unit_price, 2)
         patient_id = to_int(data.get("patient_id"))
+        dispense_key = str(data.get("idempotency_key") or data.get("uid") or "").strip()
+        if not dispense_key:
+            return jsonify({"error": "Clé d'idempotence requise pour la délivrance"}), 422
+        # Réponse stable pour une nouvelle tentative du même clic : ne plus
+        # toucher ni au compte ni au stock.
+        existing = supabase.table("patient_account_lines").select("id").eq("patient_id", patient_id).ilike(
+            "description", f"%[idemp:{dispense_key}]%"
+        ).execute().data or []
+        if existing:
+            return jsonify({"message": "Délivrance déjà enregistrée", "amount": total_amount, "idempotent": True}), 200
         try:
             # ✅ Ajout direct au compte patient unique (Mode C)
             add_patient_account_line(
@@ -198,10 +208,10 @@ def register_pharmacy_routes(app, *, runtime):
                 f"Médicament: {item.get('medication_name')} x{quantity}",
                 total_amount,
                 "pharmacy_dispense",
-                item_id,
+                None,
                 quantity,
                 unit_price,
-                None,
+                dispense_key,
                 item.get("price_currency") or item.get("currency") or "FC"
             )
 
@@ -213,7 +223,7 @@ def register_pharmacy_routes(app, *, runtime):
                 "medication_name": item.get("medication_name"),
                 "type": "sortie",
                 "quantity": quantity,
-                "reason": f"Dispensation - Patient #{patient_id}",
+                "reason": f"Dispensation - Patient #{patient_id} [idemp:{dispense_key}]",
                 "patient_id": patient_id,
                 "created_by": g.current_user["id"],
                 "created_by_name": g.current_user["name"],
@@ -290,8 +300,12 @@ def register_pharmacy_routes(app, *, runtime):
         if not patient_id or not items:
             return jsonify({"error": "Patient et articles requis"}), 422
 
+        batch_key = str(data.get("idempotency_key") or data.get("uid") or "").strip()
+        if not batch_key:
+            return jsonify({"error": "Clé d'idempotence requise pour la vente"}), 422
+
         total = 0
-        for item in items:
+        for index, item in enumerate(items):
             amount = to_float(item.get("amount"), to_float(item.get("unit_price"), 0) * to_int(item.get("quantity"), 1))
             total += amount
             add_patient_account_line(
@@ -300,10 +314,10 @@ def register_pharmacy_routes(app, *, runtime):
                 item.get("description", "Médicament"),
                 amount,
                 "pharmacy",
-                item.get("medication_id"),
+                None,
                 to_int(item.get("quantity"), 1),
                 to_float(item.get("unit_price"), 0),
-                None,
+                f"{batch_key}-{item.get('medication_id') or index}",
                 item.get("currency") or item.get("price_currency") or "FC"
             )
 

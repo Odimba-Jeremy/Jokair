@@ -1260,41 +1260,64 @@ def get_patient_map() -> dict:
 
 
 def get_tariff_amount(category: str, label: str = "", default: float = 0.0) -> float:
+    import unicodedata
+    def _norm(s):
+        s = unicodedata.normalize('NFKD', str(s or '')).encode('ASCII', 'ignore').decode('utf-8')
+        return s.strip().lower()
+
+    cat_norm = _norm(category)
+    cat_aliases = {
+        "analyse": ["Laboratoire", "laboratoire", "analyse", "analyses"],
+        "analyses": ["Laboratoire", "laboratoire", "analyse", "analyses"],
+        "lab": ["Laboratoire", "laboratoire", "analyse", "analyses"],
+        "labo": ["Laboratoire", "laboratoire", "analyse", "analyses"],
+        "laboratoire": ["Laboratoire", "laboratoire", "analyse", "analyses"],
+        "consultation": ["Consultation", "consultation"],
+        "hospitalisation": ["Hospitalisation", "hospitalisation"],
+        "hospitalization": ["Hospitalisation", "hospitalisation"],
+        "maternite": ["Maternite", "Maternité", "maternite"],
+        "soin": ["soins", "soin", "Soins"],
+        "soins": ["soins", "soin", "Soins"]
+    }
+    target_cats = cat_aliases.get(cat_norm, [category])
 
     try:
-
-        rows = supabase.table(TABLES["tariffs"]).select("*").eq("category", category).eq("is_active", True).execute().data or []
-
+        query = supabase.table(TABLES["tariffs"]).select("*").eq("is_active", True)
+        if len(target_cats) == 1:
+            query = query.eq("category", target_cats[0])
+        else:
+            query = query.in_("category", target_cats)
+        rows = query.execute().data or []
     except Exception:
-
         rows = []
 
     if rows:
-
-        label_key = str(label or "").strip().lower()
-
+        label_key = _norm(label)
         if label_key:
-
+            # 1. Match exact sur code ou libelle
             for row in rows:
+                code_norm = _norm(row.get("code", ""))
+                row_lbl_norm = _norm(row.get("label", ""))
+                if code_norm == label_key or row_lbl_norm == label_key:
+                    return to_float(row.get("amount") or row.get("price_usd"), default)
+            # 2. Match partiel (ex: "GE" dans "Goutte epaisse (GE / Paludisme)")
+            for row in rows:
+                code_norm = _norm(row.get("code", ""))
+                row_lbl_norm = _norm(row.get("label", ""))
+                if label_key in row_lbl_norm or label_key in code_norm or (code_norm and code_norm.endswith(label_key.upper())):
+                    return to_float(row.get("amount") or row.get("price_usd"), default)
+                # inverse: si le libelle de la grille est contenu dans ce qu'on cherche
+                if row_lbl_norm and row_lbl_norm in label_key:
+                    return to_float(row.get("amount") or row.get("price_usd"), default)
 
-                if str(row.get("label", "")).strip().lower() == label_key:
-
-                    return to_float(row.get("amount"), default)
-
-        return to_float(rows[0].get("amount"), default)
+        return to_float(rows[0].get("amount") or rows[0].get("price_usd"), default)
 
     # Fallback automatique sur le tarif interne
-
     t = get_tarif_from_db(label or category)
-
     if t and t.get("price_usd"):
-
         return to_float(t["price_usd"], default)
-
-    if str(category).lower() in ("consultation", "consult"):
-
-        return 15.0
-
+    if cat_norm in ("consultation", "consult"):
+        return 10.0
     return to_float(default, 0.0)
 
 
