@@ -114,30 +114,40 @@ def register_admin_routes(app, *, runtime):
     def update_user(user_id: int):
         data = fast_json()
         updates = {}
-        if "name" in data:
-            updates["name"] = data["name"].strip()
-        if "email" in data:
-            updates["email"] = data["email"].lower().strip()
+        if "name" in data and data["name"]:
+            updates["name"] = str(data["name"]).strip()
+        if "email" in data and data["email"]:
+            updates["email"] = str(data["email"]).lower().strip()
         if "role" in data and data["role"] in ROLES["staff"]:
             updates["role"] = data["role"]
-        if "photo_url" in data:
-            updates["photo_url"] = str(data["photo_url"]).strip()
         if "is_active" in data:
             updates["is_active"] = bool(data["is_active"])
         if "status" in data:
-            updates["status"] = str(data["status"]).strip()
+            val = str(data["status"]).strip().lower()
+            updates["is_active"] = val in ("active", "actif", "true", "1")
         if "password" in data and data["password"]:
             if len(data["password"]) >= 8:
                 updates["password_hash"] = generate_password_hash(data["password"])
         if not updates:
-            return jsonify({"error": "Aucune donnée à mettre à jour"}), 422
+            return jsonify({"error": "Aucune donnee a mettre a jour"}), 422
         updates["updated_at"] = now_iso()
-        result = supabase.table(TABLES["users"]).update(updates).eq("id", user_id).execute()
-        if not result.data:
+        
+        # compatible_update gere la suppression des colonnes inexistantes
+        result = compatible_update(TABLES["users"], updates, "id", user_id)
+        if not result or not result.data:
             return jsonify({"error": "Utilisateur introuvable"}), 404
-        add_audit("UPDATE", "user", f"Compte #{user_id} modifié", user_id)
+        
+        user_name = updates.get("name") or result.data[0].get("name") or user_id
+        action_desc = f"Compte #{user_id} ({user_name}) modifie"
+        if "is_active" in updates:
+            action_desc += f" [Statut: {'Actif' if updates['is_active'] else 'Desactive'}]"
+        add_audit("UPDATE", "user", action_desc, user_id)
         invalidate_cache()
-        return jsonify({k: v for k, v in result.data[0].items() if k != "password_hash"})
+        
+        user_res = dict(result.data[0])
+        user_res.pop("password_hash", None)
+        user_res["status"] = "active" if user_res.get("is_active") else "inactive"
+        return jsonify(user_res)
 
     @app.route("/api/users/<int:user_id>", methods=["DELETE"])
     @app.route("/api/auth/users/<int:user_id>", methods=["DELETE"])
