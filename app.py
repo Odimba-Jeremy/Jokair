@@ -120,11 +120,7 @@ SUPABASE_URL = "https://figmeixteescztmmprmi.supabase.co"
 
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpZ21laXh0ZWVzY3p0bW1wcm1pIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTM4NjA2MCwiZXhwIjoyMDkwOTYyMDYwfQ.zMIDYvm-Bwv0EUQzME3nZR8ZPoSwTMCaybHRnw_-7Ew"
 
-SECRET_KEY = os.getenv("SECRET_KEY", "ihub_super_secret_key_2024")
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
-
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 HOST = "0.0.0.0"
 

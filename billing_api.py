@@ -192,6 +192,44 @@ def register_billing_routes(app, *, runtime):
 
 
 
+        STANDARD_LAB_TARIFS = [
+        {"code": "NFS", "label": "Hémogramme complet (NFS)", "category": "Laboratoire", "amount": 10.0},
+        {"code": "VS", "label": "Vitesse de sédimentation (VS)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "GB", "label": "Globules blancs (Formule GB)", "category": "Laboratoire", "amount": 4.0},
+        {"code": "HB", "label": "Taux d'hémoglobine (Hb)", "category": "Laboratoire", "amount": 4.0},
+        {"code": "HCT", "label": "Hématocrite (HCT)", "category": "Laboratoire", "amount": 4.0},
+        {"code": "PLT", "label": "Numération plaquettaire (Plaquettes)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "GS", "label": "Groupe sanguin & Rhésus (GS/Rh)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "TS_TC", "label": "Temps de saignement & coagulation (TS/TC)", "category": "Laboratoire", "amount": 6.0},
+        {"code": "RETIC", "label": "Taux de réticulocytes", "category": "Laboratoire", "amount": 8.0},
+        {"code": "GE", "label": "Goutte épaisse / Frottis (Paludisme)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "SELLE", "label": "Examen coprologique des selles à frais", "category": "Laboratoire", "amount": 5.0},
+        {"code": "ECBU", "label": "Examen cytobactériologique des urines (ECBU)", "category": "Laboratoire", "amount": 15.0},
+        {"code": "BK", "label": "Recherche de Bacille de Koch (BK crachats)", "category": "Laboratoire", "amount": 10.0},
+        {"code": "SN", "label": "Frottis vaginal / Sécrétions urétrales", "category": "Laboratoire", "amount": 8.0},
+        {"code": "GLYC", "label": "Glycémie à jeun", "category": "Laboratoire", "amount": 5.0},
+        {"code": "UREE", "label": "Urée sanguine", "category": "Laboratoire", "amount": 6.0},
+        {"code": "CREAT", "label": "Créatinine sérique", "category": "Laboratoire", "amount": 6.0},
+        {"code": "ALAT", "label": "Transaminases ALAT / TGP", "category": "Laboratoire", "amount": 7.0},
+        {"code": "ASAT", "label": "Transaminases ASAT / TGO", "category": "Laboratoire", "amount": 7.0},
+        {"code": "BILI_T", "label": "Bilirubine (Totale & Directe)", "category": "Laboratoire", "amount": 8.0},
+        {"code": "IONO", "label": "Ionogramme sanguin (Na+, K+, Cl-)", "category": "Laboratoire", "amount": 12.0},
+        {"code": "CHOL_T", "label": "Cholestérol total", "category": "Laboratoire", "amount": 7.0},
+        {"code": "TRIGLY", "label": "Triglycérides", "category": "Laboratoire", "amount": 7.0},
+        {"code": "AC_URIQ", "label": "Acide urique sérique", "category": "Laboratoire", "amount": 6.0},
+        {"code": "WIDAL", "label": "Sérodiagnostic de Widal & Félix (Typhoïde)", "category": "Laboratoire", "amount": 8.0},
+        {"code": "TDR_PALU", "label": "Test rapide paludisme (TDR Palu)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "HIV", "label": "Sérologie VIH 1 & 2", "category": "Laboratoire", "amount": 5.0},
+        {"code": "HBS", "label": "Antigène HBs (Hépatite B)", "category": "Laboratoire", "amount": 8.0},
+        {"code": "HCV", "label": "Anticorps anti-VHC (Hépatite C)", "category": "Laboratoire", "amount": 8.0},
+        {"code": "SYPHILIS", "label": "Sérologie Syphilis (VDRL / RPR / TPHA)", "category": "Laboratoire", "amount": 6.0},
+        {"code": "CRP", "label": "Protéine C-Réactive (CRP)", "category": "Laboratoire", "amount": 8.0},
+        {"code": "HCG", "label": "Test de grossesse sérique / urinaire (HCG)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "COMPAT", "label": "Test de compatibilité sanguine (Crossmatch)", "category": "Laboratoire", "amount": 10.0},
+        {"code": "BU", "label": "Bandelette urinaire (BU 10 paramètres)", "category": "Laboratoire", "amount": 5.0},
+        {"code": "SED_URIN", "label": "Sédiment / Culot urinaire", "category": "Laboratoire", "amount": 5.0}
+    ]
+
     @billing.route("/api/tariffs", methods=["GET", "POST"])
     @roles_required("super_admin", "reception")
     def tariffs_compat():
@@ -201,6 +239,36 @@ def register_billing_routes(app, *, runtime):
             if category:
                 query = query.eq("category", category)
             rows = query.order("category").execute().data or []
+
+            # Garantir que TOUTES les analyses du laboratoire sont dans la grille avec un prix
+            if not category or category.lower() in ["laboratoire", "labo", "analyse"]:
+                existing_codes = {str(r.get("code") or "").strip().upper() for r in rows}
+                existing_labels = {str(r.get("label") or "").strip().lower() for r in rows}
+                for std in STANDARD_LAB_TARIFS:
+                    std_code = std["code"].upper()
+                    std_label = std["label"].lower()
+                    if std_code not in existing_codes and std_label not in existing_labels:
+                        payload = {
+                            "code": std["code"],
+                            "category": "Laboratoire",
+                            "label": std["label"],
+                            "amount": std["amount"],
+                            "is_active": True,
+                            "created_at": now_iso(),
+                            "updated_at": now_iso()
+                        }
+                        try:
+                            ins = compatible_insert(TABLES["tariffs"], payload)
+                            if ins.data:
+                                rows.append(ins.data[0])
+                                existing_codes.add(std_code)
+                            else:
+                                payload["id"] = f"lab_{std_code}"
+                                rows.append(payload)
+                        except Exception:
+                            payload["id"] = f"lab_{std_code}"
+                            rows.append(payload)
+
             for r in rows:
                 amt = to_float(r.get("amount") or r.get("price_usd") or r.get("price"), 0)
                 r["amount"] = amt

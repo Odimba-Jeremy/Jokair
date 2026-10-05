@@ -530,6 +530,26 @@ def register_laboratory_routes(app, *, runtime):
         "serologie": {
             "label": "3. Sérologie",
             "exams": {
+                "CRP": {
+                    "code": "CRP",
+                    "name": "Protéine C-Réactive (CRP)",
+                    "full_name": "Dosage quantitatif de la CRP",
+                    "aliases": ["crp", "proteine c reactive", "protéine c-réactive"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "crp", "name": "CRP", "unit": "mg/L", "ref_min": 0.0, "ref_max": 6.0, "ref_text": "< 6.0 mg/L", "type": "number", "decimal": 1}
+                    ]
+                },
+                "TDR_PALU": {
+                    "code": "TDR_PALU",
+                    "name": "Test Rapide Paludisme (TDR)",
+                    "full_name": "Test de Diagnostic Rapide du Paludisme (Ag HRP2/pLDH)",
+                    "aliases": ["tdr palu", "tdr paludisme", "tdr"],
+                    "sample": "Sang total",
+                    "params": [
+                        {"code": "resultat", "name": "Résultat TDR", "unit": "", "ref_text": "Négatif", "type": "select", "options": ["Négatif", "Positif (P. falciparum)", "Positif (Pan-malaria)"]}
+                    ]
+                },
                 "HIV": {
                     "code": "HIV",
                     "name": "HIV",
@@ -627,6 +647,109 @@ def register_laboratory_routes(app, *, runtime):
         "biochimie": {
             "label": "5. Biochimie",
             "exams": {
+                "GLYC": {
+                    "code": "GLYC",
+                    "name": "Glycémie à jeun",
+                    "full_name": "Glycémie veineuse à jeun",
+                    "aliases": ["glycemie", "glyc", "glucose sanguin", "glycémie"],
+                    "sample": "Sérum / Plasma fluoré",
+                    "params": [
+                        {"code": "glycemie", "name": "Glycémie", "unit": "mg/dL", "ref_min": 70.0, "ref_max": 110.0, "ref_text": "70 - 110 mg/dL", "type": "number", "decimal": 0}
+                    ]
+                },
+                "UREE": {
+                    "code": "UREE",
+                    "name": "Urée sanguine",
+                    "full_name": "Urée sérique",
+                    "aliases": ["uree", "urée", "urée sanguine"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "uree", "name": "Urée", "unit": "mg/dL", "ref_min": 15.0, "ref_max": 45.0, "ref_text": "15 - 45 mg/dL", "type": "number", "decimal": 1}
+                    ]
+                },
+                "CREAT": {
+                    "code": "CREAT",
+                    "name": "Créatinine sérique",
+                    "full_name": "Créatininémie",
+                    "aliases": ["creatinine", "creat", "créatinine"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "creatinine", "name": "Créatinine", "unit": "mg/dL", "ref_min": 0.6, "ref_max": 1.2, "ref_text": "0.6 - 1.2 mg/dL", "type": "number", "decimal": 2}
+                    ]
+                },
+                "ALAT": {
+                    "code": "ALAT",
+                    "name": "Transaminases ALAT (TGP)",
+                    "full_name": "Alanine aminotransférase (ALAT/TGP)",
+                    "aliases": ["alat", "tgp", "transaminases alat", "p-tgp"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "alat", "name": "ALAT (TGP)", "unit": "UI/L", "ref_min": 0.0, "ref_max": 45.0, "ref_text": "< 45 UI/L", "type": "number", "decimal": 0}
+                    ]
+                },
+                "ASAT": {
+                    "code": "ASAT",
+                    "name": "Transaminases ASAT (TGO)",
+                    "full_name": "Aspartate aminotransférase (ASAT/TGO)",
+                    "aliases": ["asat", "tgo", "transaminases asat"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "asat", "name": "ASAT (TGO)", "unit": "UI/L", "ref_min": 0.0, "ref_max": 40.0, "ref_text": "< 40 UI/L", "type": "number", "decimal": 0}
+                    ]
+                },
+                "BILI": {
+                    "code": "BILI",
+                    "name": "Bilirubine (Totale & Directe)",
+                    "full_name": "Bilirubinémie fractionnée",
+                    "aliases": ["bilirubine", "bili", "bilirubine totale"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "bili_totale", "name": "Bilirubine Totale", "unit": "mg/dL", "ref_min": 0.2, "ref_max": 1.2, "ref_text": "0.2 - 1.2 mg/dL", "type": "number", "decimal": 2},
+                        {"code": "bili_directe", "name": "Bilirubine Directe", "unit": "mg/dL", "ref_min": 0.0, "ref_max": 0.3, "ref_text": "< 0.3 mg/dL", "type": "number", "decimal": 2}
+                    ]
+                },
+                "IONO": {
+                    "code": "IONO",
+                    "name": "Ionogramme sanguin",
+                    "full_name": "Ionogramme sérique (Na+, K+, Cl-)",
+                    "aliases": ["iono", "ionogramme", "electrolytes"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "sodium", "name": "Sodium (Na+)", "unit": "mEq/L", "ref_min": 135.0, "ref_max": 145.0, "ref_text": "135 - 145 mEq/L", "type": "number", "decimal": 1},
+                        {"code": "potassium", "name": "Potassium (K+)", "unit": "mEq/L", "ref_min": 3.5, "ref_max": 5.1, "ref_text": "3.5 - 5.1 mEq/L", "type": "number", "decimal": 2},
+                        {"code": "chlore", "name": "Chlore (Cl-)", "unit": "mEq/L", "ref_min": 98.0, "ref_max": 107.0, "ref_text": "98 - 107 mEq/L", "type": "number", "decimal": 1}
+                    ]
+                },
+                "CHOL": {
+                    "code": "CHOL",
+                    "name": "Cholestérol total",
+                    "full_name": "Cholestérolémie totale",
+                    "aliases": ["cholesterol", "chol", "cholestérol"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "cholesterol", "name": "Cholestérol Total", "unit": "mg/dL", "ref_min": 120.0, "ref_max": 200.0, "ref_text": "< 200 mg/dL", "type": "number", "decimal": 0}
+                    ]
+                },
+                "TRIGLY": {
+                    "code": "TRIGLY",
+                    "name": "Triglycérides",
+                    "full_name": "Triglycéridémie",
+                    "aliases": ["triglycerides", "trigly", "triglycérides"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "triglycerides", "name": "Triglycérides", "unit": "mg/dL", "ref_min": 40.0, "ref_max": 150.0, "ref_text": "< 150 mg/dL", "type": "number", "decimal": 0}
+                    ]
+                },
+                "AC_URIQ": {
+                    "code": "AC_URIQ",
+                    "name": "Acide urique",
+                    "full_name": "Uricémie",
+                    "aliases": ["acide urique", "uricemie", "urates"],
+                    "sample": "Sérum",
+                    "params": [
+                        {"code": "acide_urique", "name": "Acide Urique", "unit": "mg/dL", "ref_min": 2.5, "ref_max": 7.0, "ref_text": "2.5 - 7.0 mg/dL", "type": "number", "decimal": 1}
+                    ]
+                },
                 "BU": {
                     "code": "BU",
                     "name": "Bandelette urinaire",
