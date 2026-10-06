@@ -11,6 +11,7 @@ import os
 import json
 import secrets
 import requests
+from html import escape
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 from flask import Blueprint, request, jsonify, g
@@ -29,6 +30,49 @@ def mask_email(email: str) -> str:
     else:
         masked_user = user_part[0] + "***" + user_part[-1]
     return f"{masked_user}@{domain}"
+
+
+INVITATION_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "invitation.html"
+)
+
+
+def render_invitation_html(
+    invite_url: str,
+    role_label: str,
+    inviter_name: str,
+    custom_message: Optional[str] = None
+) -> Optional[str]:
+    """Charge invitation.html et remplace les {{variables}}.
+
+    - Toutes les valeurs sont échappées (pas d'injection HTML).
+    - Retourne None si le fichier modèle est introuvable : l'e-mail part
+      alors en texte seul au lieu de planter l'invitation.
+    """
+    try:
+        with open(INVITATION_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+            html_content = f.read()
+    except Exception as e:
+        print(f"[ERROR] Modèle e-mail introuvable ({INVITATION_TEMPLATE_PATH}): {type(e).__name__}")
+        return None
+
+    message_block = ""
+    if custom_message:
+        message_block = (
+            '<blockquote style="margin:0 0 24px;padding:12px 16px;'
+            'border-left:4px solid #0f766e;background:#f0fdfa;">'
+            f"{escape(custom_message)}</blockquote>"
+        )
+
+    values = {
+        "inviter_name": escape(inviter_name),
+        "role_label": escape(role_label),
+        "invite_url": escape(invite_url, quote=True),
+        "message_block": message_block,
+    }
+    for key, value in values.items():
+        html_content = html_content.replace("{{" + key + "}}", value)
+    return html_content
 
 
 def send_invitation_email(
@@ -85,6 +129,9 @@ def send_invitation_email(
         "text": text_content,
         "from_name": "I-HUB"
     }
+    html_content = render_invitation_html(invite_url, role_label, inviter_name, custom_message)
+    if html_content:
+        payload["html"] = html_content
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
