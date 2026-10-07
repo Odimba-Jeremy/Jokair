@@ -6,6 +6,9 @@ import json
 
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import re
 
 import secrets
@@ -116,11 +119,11 @@ else:
 
 # ==================== CONFIGURATION ====================
 
-SUPABASE_URL = "https://figmeixteescztmmprmi.supabase.co"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://figmeixteescztmmprmi.supabase.co")
 
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpZ21laXh0ZWVzY3p0bW1wcm1pIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTM4NjA2MCwiZXhwIjoyMDkwOTYyMDYwfQ.zMIDYvm-Bwv0EUQzME3nZR8ZPoSwTMCaybHRnw_-7Ew"
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY", "ihub-secret-key-change-me")
 
 HOST = "0.0.0.0"
 
@@ -415,69 +418,7 @@ ROLES = {
 
 # ==================== GRILLE TARIFAIRE ====================
 
-TARIFS = {
-
-    "CONSULT": {"label": "Consultation médicale générale", "price_usd": 15, "category": "Consultation"},
-
-    "URGENCE": {"label": "Consultation d'urgence", "price_usd": 20, "category": "Consultation"},
-
-    "CONTROLE": {"label": "Consultation de contrôle", "price_usd": 12, "category": "Consultation"},
-
-    "SOIN_BASE": {"label": "Soin infirmier", "price_usd": 5, "category": "Soins"},
-
-    "SOIN_PANSEMENT": {"label": "Pansement", "price_usd": 5, "category": "Soins"},
-
-    "SOIN_INJECTION": {"label": "Injection", "price_usd": 3, "category": "Soins"},
-
-    "SOIN_PERFUSION": {"label": "Perfusion", "price_usd": 8, "category": "Soins"},
-
-    "SOIN_SUTURE": {"label": "Suture", "price_usd": 10, "category": "Soins"},
-
-    "SOIN_PLATRE": {"label": "Plâtre", "price_usd": 20, "category": "Soins"},
-
-    "HEMO": {"label": "Hémogramme complet", "price_usd": 15, "category": "Laboratoire"},
-
-    "HEP": {"label": "Bilan hépatique", "price_usd": 15, "category": "Laboratoire"},
-
-    "REN": {"label": "Bilan rénal", "price_usd": 15, "category": "Laboratoire"},
-
-    "LIP": {"label": "Bilan lipidique", "price_usd": 15, "category": "Laboratoire"},
-
-    "URINE": {"label": "Analyse d'urine", "price_usd": 10, "category": "Laboratoire"},
-
-    "MEDIC_BASE": {"label": "Médicament", "price_usd": 5, "category": "Pharmacie"},
-
-    "MEDIC_ANTIB": {"label": "Antibiotique", "price_usd": 8, "category": "Pharmacie"},
-
-    "MEDIC_SPEC": {"label": "Médicament spécialisé", "price_usd": 15, "category": "Pharmacie"},
-
-    "ADMISSION": {"label": "Admission / frais de dossier", "price_usd": 15, "category": "Hospitalisation"},
-
-    "HOSPI_JOUR": {"label": "Hospitalisation / jour", "price_usd": 20, "category": "Hospitalisation"},
-
-    "CHAMBRE_PRIV": {"label": "Chambre privée / jour", "price_usd": 35, "category": "Hospitalisation"},
-
-    "HOSPI_USI": {"label": "Soins intensifs / jour", "price_usd": 50, "category": "Hospitalisation"},
-
-    "SORTIE": {"label": "Bulletin de sortie", "price_usd": 5, "category": "Hospitalisation"},
-
-    "ACC_VAG": {"label": "Accouchement voie basse", "price_usd": 100, "category": "Maternité"},
-
-    "ACC_CES": {"label": "Accouchement césarienne", "price_usd": 180, "category": "Maternité"},
-
-    "CPN": {"label": "Consultation prénatale", "price_usd": 15, "category": "Maternité"},
-
-    "ECHO_OBST": {"label": "Échographie obstétricale", "price_usd": 25, "category": "Maternité"},
-
-    "LIT_MAT": {"label": "Lit maternité / jour", "price_usd": 25, "category": "Maternité"},
-
-    "RADIO_THO": {"label": "Radiographie thorax", "price_usd": 20, "category": "Imagerie"},
-
-    "SCAN": {"label": "Scanner", "price_usd": 60, "category": "Imagerie"},
-
-    "IRM": {"label": "IRM", "price_usd": 100, "category": "Imagerie"},
-
-}
+TARIFS = {}  # Les tarifs proviennent exclusivement de tariff_grid.
 
 # Statuts autorisés pour la file d'attente
 
@@ -1740,22 +1681,7 @@ def get_tarif_from_db(code_tarif):
 
     
 
-    # 2. Fallback robuste sur le catalogue interne TARIFS
-
-    if code_upper in TARIFS:
-
-        t = TARIFS[code_upper]
-
-        return {
-
-            "label": t.get("label", code_tarif),
-
-            "category": t.get("category", "soins"),
-
-            "price_usd": to_float(t.get("price_usd"), 0)
-
-        }
-
+    # Aucun tarif interne : une prestation non configurée ne doit jamais être facturée.
     return None
 
 

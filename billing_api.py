@@ -192,94 +192,43 @@ def register_billing_routes(app, *, runtime):
 
 
 
-        STANDARD_LAB_TARIFS = [
-        {"code": "NFS", "label": "Hémogramme complet (NFS)", "category": "Laboratoire", "amount": 10.0},
-        {"code": "VS", "label": "Vitesse de sédimentation (VS)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "GB", "label": "Globules blancs (Formule GB)", "category": "Laboratoire", "amount": 4.0},
-        {"code": "HB", "label": "Taux d'hémoglobine (Hb)", "category": "Laboratoire", "amount": 4.0},
-        {"code": "HCT", "label": "Hématocrite (HCT)", "category": "Laboratoire", "amount": 4.0},
-        {"code": "PLT", "label": "Numération plaquettaire (Plaquettes)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "GS", "label": "Groupe sanguin & Rhésus (GS/Rh)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "TS_TC", "label": "Temps de saignement & coagulation (TS/TC)", "category": "Laboratoire", "amount": 6.0},
-        {"code": "RETIC", "label": "Taux de réticulocytes", "category": "Laboratoire", "amount": 8.0},
-        {"code": "GE", "label": "Goutte épaisse / Frottis (Paludisme)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "SELLE", "label": "Examen coprologique des selles à frais", "category": "Laboratoire", "amount": 5.0},
-        {"code": "ECBU", "label": "Examen cytobactériologique des urines (ECBU)", "category": "Laboratoire", "amount": 15.0},
-        {"code": "BK", "label": "Recherche de Bacille de Koch (BK crachats)", "category": "Laboratoire", "amount": 10.0},
-        {"code": "SN", "label": "Frottis vaginal / Sécrétions urétrales", "category": "Laboratoire", "amount": 8.0},
-        {"code": "GLYC", "label": "Glycémie à jeun", "category": "Laboratoire", "amount": 5.0},
-        {"code": "UREE", "label": "Urée sanguine", "category": "Laboratoire", "amount": 6.0},
-        {"code": "CREAT", "label": "Créatinine sérique", "category": "Laboratoire", "amount": 6.0},
-        {"code": "ALAT", "label": "Transaminases ALAT / TGP", "category": "Laboratoire", "amount": 7.0},
-        {"code": "ASAT", "label": "Transaminases ASAT / TGO", "category": "Laboratoire", "amount": 7.0},
-        {"code": "BILI_T", "label": "Bilirubine (Totale & Directe)", "category": "Laboratoire", "amount": 8.0},
-        {"code": "IONO", "label": "Ionogramme sanguin (Na+, K+, Cl-)", "category": "Laboratoire", "amount": 12.0},
-        {"code": "CHOL_T", "label": "Cholestérol total", "category": "Laboratoire", "amount": 7.0},
-        {"code": "TRIGLY", "label": "Triglycérides", "category": "Laboratoire", "amount": 7.0},
-        {"code": "AC_URIQ", "label": "Acide urique sérique", "category": "Laboratoire", "amount": 6.0},
-        {"code": "WIDAL", "label": "Sérodiagnostic de Widal & Félix (Typhoïde)", "category": "Laboratoire", "amount": 8.0},
-        {"code": "TDR_PALU", "label": "Test rapide paludisme (TDR Palu)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "HIV", "label": "Sérologie VIH 1 & 2", "category": "Laboratoire", "amount": 5.0},
-        {"code": "HBS", "label": "Antigène HBs (Hépatite B)", "category": "Laboratoire", "amount": 8.0},
-        {"code": "HCV", "label": "Anticorps anti-VHC (Hépatite C)", "category": "Laboratoire", "amount": 8.0},
-        {"code": "SYPHILIS", "label": "Sérologie Syphilis (VDRL / RPR / TPHA)", "category": "Laboratoire", "amount": 6.0},
-        {"code": "CRP", "label": "Protéine C-Réactive (CRP)", "category": "Laboratoire", "amount": 8.0},
-        {"code": "HCG", "label": "Test de grossesse sérique / urinaire (HCG)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "COMPAT", "label": "Test de compatibilité sanguine (Crossmatch)", "category": "Laboratoire", "amount": 10.0},
-        {"code": "BU", "label": "Bandelette urinaire (BU 10 paramètres)", "category": "Laboratoire", "amount": 5.0},
-        {"code": "SED_URIN", "label": "Sédiment / Culot urinaire", "category": "Laboratoire", "amount": 5.0}
-    ]
+    def normalize_tariff_category(cat: str) -> str:
+        c = str(cat or "").strip().lower()
+        if c in ("consultation", "consultations"):
+            return "Consultation"
+        if c in ("laboratoire", "labo", "analyse", "analyses"):
+            return "Laboratoire"
+        if c in ("hospitalisation", "hospitalisations", "sejour"):
+            return "Hospitalisation"
+        if c in ("soin", "soins", "soin infirmier", "soins infirmiers", "acte", "actes"):
+            return "Soins"
+        if c in ("maternite", "maternité", "accouchement", "cesarienne"):
+            return "Maternité"
+        return cat.strip().capitalize() if cat else "Autre"
 
     @billing.route("/api/tariffs", methods=["GET", "POST"])
-    @roles_required("super_admin", "reception")
+    @roles_required("super_admin", "admin", "reception")
     def tariffs_compat():
         if request.method == "GET":
             category = request.args.get("category")
             query = supabase.table(TABLES["tariffs"]).select("*")
             if category:
-                query = query.eq("category", category)
+                norm_cat = normalize_tariff_category(category)
+                query = query.or_(f"category.eq.{category},category.eq.{norm_cat}")
             rows = query.order("category").execute().data or []
-
-            # Garantir que TOUTES les analyses du laboratoire sont dans la grille avec un prix
-            if not category or category.lower() in ["laboratoire", "labo", "analyse"]:
-                existing_codes = {str(r.get("code") or "").strip().upper() for r in rows}
-                existing_labels = {str(r.get("label") or "").strip().lower() for r in rows}
-                for std in STANDARD_LAB_TARIFS:
-                    std_code = std["code"].upper()
-                    std_label = std["label"].lower()
-                    if std_code not in existing_codes and std_label not in existing_labels:
-                        payload = {
-                            "code": std["code"],
-                            "category": "Laboratoire",
-                            "label": std["label"],
-                            "amount": std["amount"],
-                            "is_active": True,
-                            "created_at": now_iso(),
-                            "updated_at": now_iso()
-                        }
-                        try:
-                            ins = compatible_insert(TABLES["tariffs"], payload)
-                            if ins.data:
-                                rows.append(ins.data[0])
-                                existing_codes.add(std_code)
-                            else:
-                                payload["id"] = f"lab_{std_code}"
-                                rows.append(payload)
-                        except Exception:
-                            payload["id"] = f"lab_{std_code}"
-                            rows.append(payload)
 
             for r in rows:
                 amt = to_float(r.get("amount") or r.get("price_usd") or r.get("price"), 0)
                 r["amount"] = amt
                 r["price_usd"] = amt
+                r["category"] = normalize_tariff_category(r.get("category"))
             return jsonify(rows)
 
-        # POST - creation (admin seulement)
-        if g.current_user.get("role") != "super_admin":
+        # POST - creation (admin / super_admin seulement)
+        if g.current_user.get("role") not in ("super_admin", "admin"):
             return jsonify({"error": "Modification reservee a l'administration"}), 403
         data = fast_json()
-        category = str(data.get("category", "")).strip()
+        category = normalize_tariff_category(str(data.get("category", "")).strip())
         label = str(data.get("label", "")).strip()
         code = str(data.get("code") or "").strip().upper()
         amount = round(to_float(data.get("amount") or data.get("price_usd") or data.get("price"), 0), 2)
@@ -307,7 +256,7 @@ def register_billing_routes(app, *, runtime):
         return jsonify(tariff), 201
 
     @billing.route("/api/tariffs/<int:tariff_id>", methods=["PUT", "DELETE"])
-    @roles_required("super_admin")
+    @roles_required("super_admin", "admin")
     def tariff_item_compat(tariff_id: int):
         """Compatibilité de la grille Admin avec la table tariff_grid."""
         existing = supabase.table(TABLES["tariffs"]).select("*").eq("id", tariff_id).execute().data or []
@@ -316,19 +265,23 @@ def register_billing_routes(app, *, runtime):
         current = existing[0]
 
         if request.method == "DELETE":
-            supabase.table(TABLES["tariffs"]).delete().eq("id", tariff_id).execute()
+            # Les historiques et les comptes patients doivent toujours pouvoir
+            # relire un ancien tarif : une suppression devient une désactivation.
+            result = compatible_update(TABLES["tariffs"], {
+                "is_active": False, "updated_at": now_iso()
+            }, "id", tariff_id)
             try:
                 compatible_insert(TABLES["tariff_history"], {
                     "tariff_id": tariff_id, "category": current.get("category"), "label": current.get("label"),
-                    "old_amount": to_float(current.get("amount"), 0), "new_amount": None,
-                    "action": "DELETE", "created_by": g.current_user["id"],
+                    "old_amount": to_float(current.get("amount"), 0), "new_amount": to_float(current.get("amount"), 0),
+                    "action": "DEACTIVATE", "created_by": g.current_user["id"],
                     "created_by_name": g.current_user["name"], "created_at": now_iso()
                 })
             except Exception:
                 pass
-            add_audit("DELETE", "tariff", f"Tarif #{tariff_id} supprimé", tariff_id)
+            add_audit("UPDATE", "tariff", f"Tarif #{tariff_id} désactivé", tariff_id)
             invalidate_cache()
-            return jsonify({"message": "Tarif supprimé"})
+            return jsonify(result.data[0] if result.data else {"id": tariff_id, "is_active": False, "message": "Tarif désactivé"})
 
         data = fast_json()
         amount = round(to_float(data.get("amount", data.get("price_usd", current.get("amount"))), 0), 2)
@@ -336,7 +289,7 @@ def register_billing_routes(app, *, runtime):
             return jsonify({"error": "Montant invalide"}), 422
         updates = {
             "code": str(data.get("code", current.get("code") or "")).strip().upper(),
-            "category": str(data.get("category", current.get("category") or "")).strip(),
+            "category": normalize_tariff_category(str(data.get("category", current.get("category") or "")).strip()),
             "label": str(data.get("label", current.get("label") or "")).strip(),
             "amount": amount,
             "is_active": data.get("is_active", current.get("is_active", True)),

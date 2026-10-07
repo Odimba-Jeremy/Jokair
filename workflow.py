@@ -795,7 +795,9 @@ def register_workflow_routes(app, *, runtime):
                 return jsonify({"error": "Ce lit est déjà occupé"}), 422
             if to_int(room.get("occupied_beds"), 0) >= to_int(room.get("total_beds"), 1):
                 return jsonify({"error": "Aucun lit libre dans cette chambre"}), 422
-            room_price = to_float(room.get("price_per_day") or room.get("daily_rate") or room.get("price") or get_tariff_amount("hospitalisation", "Hospitalisation", 15.0))
+            room_price = to_float(room.get("price_per_day") or room.get("daily_rate") or room.get("price"), 0)
+            if room_price <= 0:
+                return jsonify({"error": "Le prix journalier de cette chambre doit être configuré"}), 422
             data = {
                 **data,
                 "room": room.get("room_number") or room.get("name") or str(room_id),
@@ -1003,101 +1005,6 @@ def register_workflow_routes(app, *, runtime):
                 })
         timeline.sort(key=lambda item: str(item.get("date") or ""), reverse=True)
         return jsonify({"patient": patient, "timeline": timeline})
-
-    @workflow.route("/api/workflow/tariffs", methods=["GET", "POST"])
-    @roles_required("super_admin")
-    def workflow_tariffs():
-        if request.method == "GET":
-            category = request.args.get("category")
-            query = supabase.table(TABLES["tariffs"]).select("*")
-            if category:
-                query = query.eq("category", category)
-            rows = query.order("category").execute().data or []
-            for r in rows:
-                amt = to_float(r.get("amount") or r.get("price_usd") or r.get("price"), 0)
-                r["amount"] = amt
-                r["price_usd"] = amt
-            return jsonify(rows)
-        data = fast_json()
-        category = data.get("category", "").strip()
-        label = data.get("label", "").strip()
-        code = str(data.get("code") or "").strip().upper()
-        amount = round(to_float(data.get("amount") or data.get("price_usd") or data.get("price"), 0), 2)
-        if not category or not label or amount < 0:
-            return jsonify({"error": "Categorie, libelle et montant requis"}), 422
-        payload = {
-            "code": code,
-            "category": category,
-            "label": label,
-            "amount": amount,
-            "is_active": data.get("is_active", True),
-            "created_by": g.current_user["id"],
-            "created_by_name": g.current_user["name"],
-            "created_at": now_iso(),
-            "updated_at": now_iso()
-        }
-        result = compatible_insert(TABLES["tariffs"], payload)
-        tariff = result.data[0] if result.data else payload
-        # L'historique est utile, mais ne doit jamais empêcher l'administration
-        # de créer un tarif si la table tariff_history n'est pas encore migrée.
-        try:
-            compatible_insert(TABLES["tariff_history"], {
-                "tariff_id": tariff.get("id"),
-                "category": category,
-                "label": label,
-                "old_amount": 0,
-                "new_amount": amount,
-                "action": "CREATE",
-                "created_by": g.current_user["id"],
-                "created_by_name": g.current_user["name"],
-                "created_at": now_iso()
-            })
-        except Exception as exc:
-            print(f"[TARIFF_HISTORY] Historique non enregistré: {exc}")
-        add_audit("CREATE", "tariff", f"Tarif {category}: {label} = {amount}", tariff.get("id"))
-        invalidate_cache()
-        return jsonify(tariff), 201
-
-    @workflow.route("/api/workflow/tariffs/<int:tariff_id>", methods=["PUT"])
-    @roles_required("super_admin")
-    def update_workflow_tariff(tariff_id: int):
-        data = fast_json()
-        existing = supabase.table(TABLES["tariffs"]).select("*").eq("id", tariff_id).execute().data or []
-        if not existing:
-            return jsonify({"error": "Tarif introuvable"}), 404
-        current = existing[0]
-        updates = {
-            "code": str(data.get("code", current.get("code") or "")).strip().upper(),
-            "category": data.get("category", current.get("category")),
-            "label": data.get("label", current.get("label")),
-            "amount": round(to_float(data.get("amount"), current.get("amount")), 2),
-            "is_active": data.get("is_active", current.get("is_active", True)),
-            "updated_at": now_iso()
-        }
-        result = compatible_update(TABLES["tariffs"], updates, "id", tariff_id)
-        try:
-            compatible_insert(TABLES["tariff_history"], {
-                "tariff_id": tariff_id,
-                "category": updates["category"],
-                "label": updates["label"],
-                "old_amount": to_float(current.get("amount"), 0),
-                "new_amount": updates["amount"],
-                "action": "UPDATE",
-                "created_by": g.current_user["id"],
-                "created_by_name": g.current_user["name"],
-                "created_at": now_iso()
-            })
-        except Exception as exc:
-            print(f"[TARIFF_HISTORY] Historique non enregistré: {exc}")
-        add_audit("UPDATE", "tariff", f"Tarif #{tariff_id} modifie", tariff_id)
-        invalidate_cache()
-        return jsonify(result.data[0] if result.data else updates)
-
-    @workflow.route("/api/workflow/tariffs/history", methods=["GET"])
-    @roles_required("super_admin")
-    def workflow_tariff_history():
-        rows = supabase.table(TABLES["tariff_history"]).select("*").order("created_at", desc=True).execute().data or []
-        return jsonify(rows)
 
     # ==================== HOSPITALIZATION FOLLOWUPS ====================
 
