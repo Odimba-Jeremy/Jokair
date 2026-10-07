@@ -799,24 +799,27 @@ def register_laboratory_routes(app, *, runtime):
     @laboratory.route("/api/laboratory/params/<path:test_type>", methods=["GET"])
     @roles_required("super_admin", "laboratoire", "docteur", "infirmier")
     def get_lab_params_v2(test_type: str):
-        """Retourne les paramètres structurés et références actives d'un examen."""
+        """Retourne les paramètres structurés uniquement pour la bandelette urinaire (les autres examens sont directs)."""
+        clean_name = str(test_type or "").strip().lower()
         exam = find_exam_spec(test_type)
-        if exam:
-            # Injecter les éventuelles références personnalisées du laboratoire
+        is_bu = "bandelette" in clean_name or "bu" == clean_name or (exam and ("bandelette" in exam.get("code", "").lower() or "bu" == exam.get("code", "").lower()))
+        if is_bu and exam:
             params = []
-            for p in exam["params"]:
+            for p in exam.get("params", []):
                 p_copy = dict(p)
                 custom_key = f"{exam['code']}:{p['code']}"
                 if custom_key in _CUSTOM_LAB_REFS:
                     p_copy.update(_CUSTOM_LAB_REFS[custom_key])
                 params.append(p_copy)
             return jsonify({
-                "exam": exam["name"],
-                "full_name": exam["full_name"],
-                "sample": exam["sample"],
+                "exam": "Bandelette urinaire",
+                "full_name": "Bandelette urinaire (10 paramètres)",
+                "sample": "Urine fraîche",
                 "params": params
             })
-        return jsonify({"exam": test_type, "full_name": test_type, "sample": "Biologique", "params": []})
+        full_name = exam.get("full_name") if exam else test_type
+        sample = exam.get("sample") if exam else "Biologique"
+        return jsonify({"exam": test_type, "full_name": full_name, "sample": sample, "params": []})
 
     @laboratory.route("/api/laboratory/references", methods=["GET", "PUT"])
     @roles_required("super_admin", "laboratoire")

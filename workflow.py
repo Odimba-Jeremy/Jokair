@@ -696,17 +696,27 @@ def register_workflow_routes(app, *, runtime):
         return jsonify(result.data[0]), 201
 
     def bill_hospitalization_days(hosp, through_date=None):
-        """Cote chaque journée de séjour exactement une fois."""
+        """Cote chaque journée de séjour. La facturation commence le lendemain à partir de minuit/4h du matin."""
         hosp_id = hosp.get("id")
         patient_id = hosp.get("patient_id")
         daily_rate = to_float(hosp.get("daily_rate"), 0)
         if not hosp_id or not patient_id or daily_rate <= 0:
             return
-        start = parse_date(hosp.get("admission_date") or hosp.get("created_at"))
-        end = parse_date(through_date) if through_date else datetime.now(timezone.utc).date()
-        if not start or not end or end < start:
+        admission_dt_str = hosp.get("admission_date") or hosp.get("created_at")
+        admission_date = parse_date(admission_dt_str)
+        if not admission_date:
             return
-        day = start
+
+        now_dt = datetime.now(timezone.utc)
+        # Règle : le 1er jour à l'admission n'est pas facturé immédiatement.
+        # La facturation commence à minuit (ou 4h du matin) le lendemain de l'admission.
+        first_billable_day = admission_date + timedelta(days=1)
+
+        end = parse_date(through_date) if through_date else now_dt.date()
+        if not end or end < first_billable_day:
+            return
+
+        day = first_billable_day
         while day <= end:
             day_key = day.isoformat()
             add_patient_account_line(
@@ -715,8 +725,6 @@ def register_workflow_routes(app, *, runtime):
                 description=f"Hospitalisation: Séjour du {day_key} (Chambre {hosp.get('room') or 'standard'})",
                 amount=daily_rate,
                 source="hospitalization_daily",
-                # source_id ne doit pas être l'hospitalisation seule, sinon il
-                # bloque toutes les journées suivantes comme des doublons.
                 source_id=None,
                 quantity=1,
                 unit_price=daily_rate,

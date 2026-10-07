@@ -1545,87 +1545,57 @@ def register_billing_routes(app, *, runtime):
 
 
 
-        # Calcul robuste
+        # Filtrage du cycle actif : si de nouvelles prestations sont ajoutées après un paiement/facturation,
+        # le compte patient actif ne doit pas réafficher les anciennes prestations déjà facturées/soldées.
+        pending_lines = [l for l in lines if str(l.get("status") or "").lower() not in ("invoiced", "cancelled")]
+        has_new_activity = len(pending_lines) > 0
+
+        # Si le compte a de nouvelles prestations en attente, le cycle actif correspond à ces prestations
+        display_lines = pending_lines if has_new_activity else lines
 
         total_facture = round(sum(
             to_float(l.get("amount"), 0)
-            for l in lines if str(l.get("status") or "").lower() != "cancelled"
+            for l in display_lines if str(l.get("status") or "").lower() != "cancelled"
         ), 2)
 
-        
-
         total_paid_real = 0.0
-
-        for tx in transactions:
-
-            amt = to_float(tx.get("amount"), 0)
-
-            if str(tx.get("type", "")).lower() == "credit" or amt < 0:
-
-                total_paid_real += abs(amt)
-
-        total_paid_real = round(total_paid_real, 2)
-
-        
+        if not has_new_activity:
+            for tx in transactions:
+                amt = to_float(tx.get("amount"), 0)
+                if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                    total_paid_real += abs(amt)
+            total_paid_real = round(total_paid_real, 2)
 
         solde_restant = round(max(0.0, total_facture - total_paid_real), 2)
 
-
-
         # Normalisation pour l'affichage de l'interface (badges de statut et libellé de service)
-
         normalized_lines = []
-
-        for l in lines:
-
+        for l in display_lines:
             line_copy = dict(l)
-
             db_status = str(line_copy.get("status") or "pending").lower()
-
             line_copy["status"] = "PAID" if db_status == "invoiced" else "PENDING"
-
             cat = str(line_copy.get("category") or line_copy.get("source") or "Général").capitalize()
-
             line_copy["service"] = cat
-
             normalized_lines.append(line_copy)
 
-
-
         # Normalisation des montants de transactions (valeur absolue positive pour l'affichage)
-
         normalized_payments = []
-
-        for tx in transactions:
-
+        for tx in (transactions if not has_new_activity else []):
             tx_copy = dict(tx)
-
             raw_amt = to_float(tx_copy.get("amount"), 0)
-
             tx_copy["amount"] = abs(raw_amt)
-
             normalized_payments.append(tx_copy)
 
-
-
         account["status"] = "OPEN" if solde_restant > 0 else ("PAID" if lines else "EMPTY")
-
         account["lines"] = normalized_lines
-
         account["payments"] = normalized_payments
-
         account["total"] = solde_restant          # Reste à payer pour le nouveau frontend
-
-        account["total_facture"] = total_facture  # Nouveau champ
-
+        account["total_facture"] = total_facture  # Total du cycle actif
         account["total_pending"] = solde_restant  # Fallback compatibilité ancien frontend
-
-        account["total_paid"] = total_paid_real   # Vrai montant payé
-
+        account["total_paid"] = total_paid_real   # Montant payé sur le cycle actif
         account["total_all"] = total_facture
-
         account["balance"] = solde_restant
-
+        account["all_lines_count"] = len(lines)
         return jsonify(account)
 
 

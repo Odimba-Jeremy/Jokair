@@ -351,6 +351,7 @@ def register_medical_routes(app, *, runtime):
                 "patient_name": patient_name,
                 "doctor_id": doc_id,
                 "prescribed_by": doc_name,
+                "instructions": str(data.get("instructions") or "").strip(),
                 "acts": acts,
                 "injectables": injectables,
                 "consumables": consumables,
@@ -404,6 +405,7 @@ def register_medical_routes(app, *, runtime):
             if metadata.get("is_session") or row.get("care_type") == "seance_soin":
                 doc_name = metadata.get("prescribed_by") or row.get("performed_by_name") or "Médecin"
                 pat_name = patients.get(row.get("patient_id"), metadata.get("patient_name") or "Inconnu")
+                care_inst = metadata.get("instructions") or row.get("instructions") or ""
                 for inj in metadata.get("injectables") or []:
                     rows.append({
                         **row,
@@ -411,6 +413,7 @@ def register_medical_routes(app, *, runtime):
                         "category": "injectable",
                         "prescribed_by": doc_name,
                         "patient_name": pat_name,
+                        "instructions": care_inst or inj.get("instructions") or "",
                         "session_id": row.get("id"),
                         "product_name": inj.get("product_name") or inj.get("name") or "Injectable",
                         # L'ID de la séance doit rester celui de care_logs, jamais
@@ -424,6 +427,7 @@ def register_medical_routes(app, *, runtime):
                         "category": "consommable",
                         "prescribed_by": doc_name,
                         "patient_name": pat_name,
+                        "instructions": care_inst or cons.get("instructions") or "",
                         "session_id": row.get("id"),
                         "product_name": cons.get("product_name") or cons.get("name") or "Consommable",
                         "id": row.get("id")

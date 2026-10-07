@@ -156,6 +156,15 @@ def register_patient_routes(
         result = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
         if not result.data:
             return jsonify({"error": "Patient introuvable"}), 404
+        if updates.get("status") == "discharged":
+            try:
+                supabase.table("hospitalizations").update({
+                    "status": "discharged",
+                    "discharge_date": now_iso(),
+                    "updated_at": now_iso()
+                }).eq("patient_id", patient_id).in_("status", ["admitted", "hospitalized", "active"]).execute()
+            except Exception:
+                pass
         patient = enrich_patient_identifier(add_pregnancy_flags(result.data)[0])
         if not can_access_patient_record(patient):
             return jsonify({"error": "Acces patient non autorise"}), 403
@@ -191,8 +200,17 @@ def register_patient_routes(
                         "field": field
                     }), 403
         updates = {key: value for key, value in data.items() if key in allowed_fields and value is not None}
-        if "status" in updates and updates["status"] not in allowed_statuses:
-            return jsonify({"error": f"Statut invalide: {updates['status']}. Valeurs autorisées: {', '.join(allowed_statuses)}"}), 422
+        if "status" in updates:
+            norm_st = str(updates["status"]).strip().lower()
+            status_aliases = {
+                "sorti": "discharged", "sortis": "discharged", "discharged": "discharged",
+                "hospitalise": "admitted", "hospitalisé": "admitted", "admitted": "admitted",
+                "actif": "active", "active": "active"
+            }
+            if norm_st in status_aliases:
+                updates["status"] = status_aliases[norm_st]
+            elif updates["status"] not in allowed_statuses and norm_st not in allowed_statuses:
+                return jsonify({"error": f"Statut invalide: {updates['status']}"}), 422
         updates["updated_at"] = now_iso()
         result = supabase.table(tables["patients"]).update(updates).eq("id", patient_id).execute()
         if not result.data:

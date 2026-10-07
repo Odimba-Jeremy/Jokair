@@ -420,9 +420,11 @@ ROLES = {
 
 TARIFS = {}  # Les tarifs proviennent exclusivement de tariff_grid.
 
-# Statuts autorisés pour la file d'attente
-
-ALLOWED_STATUSES = {"en attente", "SV pris", "dispatché"}
+# Statuts autorisés pour les patients et la file
+ALLOWED_STATUSES = {
+    "en attente", "SV pris", "dispatché", "discharged", "sorti",
+    "active", "actif", "hospitalized", "hospitalisé", "admitted", "en consultation", "terminé"
+}
 
 def hospitalization_rooms_from_db() -> list[dict]:
 
@@ -458,33 +460,63 @@ def hospitalization_rooms_from_db() -> list[dict]:
 
     return rooms
 
+# ==================== AUTHENTIFICATION & ROLES STRICTS ====================
+
+def create_token(user: dict) -> str:
+    payload = {
+        "id": user["id"],
+        "role": user["role"],
+        "email": user["email"],
+        "exp": int(time.time()) + TOKEN_EXPIRY
+    }
+    return serializer.dumps(payload)
+
+def decode_token(token: str) -> dict:
+    return serializer.loads(token, max_age=TOKEN_EXPIRY)
+
 def token_required(f):
-
     @wraps(f)
-
     def decorated(*args, **kwargs):
-
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if not token:
+            token = request.cookies.get("ihub_session", "")
+        if not token:
+            return jsonify({"error": "Token requis"}), 401
+        try:
+            payload = decode_token(token)
+            cache_key = f"user:{payload['id']}"
+            user_data = cache.get(cache_key)
+            if user_data is None:
+                result = supabase.table(TABLES["users"]).select("*").eq("id", payload["id"]).execute()
+                if not result.data:
+                    return jsonify({"error": "Utilisateur introuvable"}), 401
+                user_data = result.data[0]
+                cache.set(cache_key, user_data, CACHE_TIMEOUT)
+            g.current_user = user_data
+        except (SignatureExpired, BadSignature):
+            return jsonify({"error": "Token invalide ou expire"}), 401
         return f(*args, **kwargs)
-
     return decorated
 
-
-
-def roles_required(*allowed_roles):
-
+def roles_required(*allowed):
     def decorator(f):
-
+        @token_required
         @wraps(f)
-
-        def wrapper(*args, **kwargs):
-
-            # Simple stub: no actual role checking
-
+        def decorated(*args, **kwargs):
+            user_role = g.current_user.get("role") if hasattr(g, "current_user") and g.current_user else None
+            allowed_set = set(allowed)
+            if "super_admin" in allowed_set:
+                allowed_set.add("admin")
+            if not user_role or user_role not in allowed_set:
+                return jsonify({
+                    "error": "Acces interdit: role insuffisant",
+                    "required": list(allowed_set),
+                    "current": user_role
+                }), 403
             return f(*args, **kwargs)
-
-        return wrapper
-
+        return decorated
     return decorator
+
 
 
 
@@ -966,97 +998,7 @@ def filter_appointments_for_role(appointments: list) -> list:
 
 # ==================== AUTHENTIFICATION ====================
 
-def create_token(user: dict) -> str:
-
-    payload = {
-
-        "id": user["id"],
-
-        "role": user["role"],
-
-        "email": user["email"],
-
-        "exp": int(time.time()) + TOKEN_EXPIRY
-
-    }
-
-    return serializer.dumps(payload)
-
-
-
-def decode_token(token: str) -> dict:
-
-    return serializer.loads(token, max_age=TOKEN_EXPIRY)
-
-
-
-def token_required(f):
-
-    @wraps(f)
-
-    def decorated(*args, **kwargs):
-
-        token = request.headers.get("Authorization", "").replace("Bearer ", "")
-
-        if not token:
-
-            token = request.cookies.get("ihub_session", "")
-
-        if not token:
-
-            return jsonify({"error": "Token requis"}), 401
-
-        try:
-
-            payload = decode_token(token)
-
-            cache_key = f"user:{payload['id']}"
-
-            user_data = cache.get(cache_key)
-
-            if user_data is None:
-
-                result = supabase.table(TABLES["users"]).select("*").eq("id", payload["id"]).execute()
-
-                if not result.data:
-
-                    return jsonify({"error": "Utilisateur introuvable"}), 401
-
-                user_data = result.data[0]
-
-                cache.set(cache_key, user_data, CACHE_TIMEOUT)
-
-            g.current_user = user_data
-
-        except (SignatureExpired, BadSignature):
-
-            return jsonify({"error": "Token invalide ou expiré"}), 401
-
-        return f(*args, **kwargs)
-
-    return decorated
-
-
-
-def roles_required(*allowed):
-
-    def decorator(f):
-
-        @token_required
-
-        @wraps(f)
-
-        def decorated(*args, **kwargs):
-
-            if g.current_user.get("role") not in allowed:
-
-                return jsonify({"error": "Accès interdit"}), 403
-
-            return f(*args, **kwargs)
-
-        return decorated
-
-    return decorator
+# (create_token, decode_token, token_required, roles_required definis plus haut)
 
 
 
