@@ -119,11 +119,11 @@ else:
 
 # ==================== CONFIGURATION ====================
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://figmeixteescztmmprmi.supabase.co")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
 
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "ihub-secret-key-change-me")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 HOST = "0.0.0.0"
 
