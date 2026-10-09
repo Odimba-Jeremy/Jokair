@@ -1,8 +1,8 @@
-"""Routes d'authentification I-HUB.
-
-Le module ne possède pas de client Supabase global : l'application lui injecte
-ses dépendances au démarrage. Cela évite les imports circulaires avec app.py.
-"""
+import os
+import time
+import secrets
+import requests
+from html import escape
 from flask import Blueprint, jsonify, request, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -97,13 +97,16 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
         return jsonify({"user": {k: v for k, v in g.current_user.items() if k != "password_hash"}})
 
     # ==================== RATE LIMITING & RÉINITIALISATION MOT DE PASSE ====================
-    import os
-    import time
-    import secrets
-    import requests
-
     _reset_rate_limits = {}  # { key: [timestamp, ...] }
     _reset_codes = {}        # { email: { "code": "...", "expires_at": ..., "attempts": 0 } }
+
+    def _mask_email(email: str) -> str:
+        if not email or "@" not in email:
+            return "***"
+        user_part, domain = email.split("@", 1)
+        if len(user_part) <= 2:
+            return user_part[0] + "***@" + domain
+        return user_part[0] + "***" + user_part[-1] + "@" + domain
 
     def _is_rate_limited(key: str, max_requests: int = 3, window_seconds: int = 900) -> bool:
         now = time.time()
@@ -120,7 +123,7 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
     def _send_reset_email(to_email: str, code: str, reset_url: str):
         email_craft_url = os.getenv("EMAIL_CRAFT_URL", "https://email-craft-90.lovable.app/api/public/v1/send")
         api_key = os.getenv("EMAIL_CRAFT_API_KEY", "")
-        
+
         subject = "Réinitialisation de votre mot de passe I-HUB"
         text_content = (
             f"Bonjour,\n\n"
@@ -133,40 +136,72 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
             f"Cordialement,\n"
             f"L'équipe I-HUB"
         )
+
         template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reset_password_email.html")
         html_content = None
-        try:
-            with open(template_path, "r", encoding="utf-8") as f:
-                html_content = f.read()
-                html_content = html_content.replace("{{code}}", str(code))
-                html_content = html_content.replace("{{reset_url}}", str(reset_url))
-                html_content = html_content.replace("{{to_email}}", str(to_email))
-                html_content = html_content.replace("{{year}}", "2026")
-        except Exception as e:
-            print(f"[AUTH] Modèle e-mail introuvable ({template_path}): {e}")
+        if os.path.exists(template_path):
+            try:
+                with open(template_path, "r", encoding="utf-8") as f:
+                    raw_html = f.read()
+                    raw_html = raw_html.replace("{{code}}", escape(str(code)))
+                    raw_html = raw_html.replace("{{reset_url}}", escape(str(reset_url), quote=True))
+                    raw_html = raw_html.replace("{{to_email}}", escape(str(to_email)))
+                    raw_html = raw_html.replace("{{year}}", "2026")
+                    html_content = raw_html
+            except Exception as e:
+                print(f"[AUTH] Lecture template externe ({template_path}): {e}")
 
-        # Log de secours pour le développement
-        print(f"[AUTH] Code de réinitialisation pour {to_email}: {code}")
+        # Modèle HTML de secours propre si le fichier séparé n'est pas encore téléversé sur Render
+        if not html_content:
+            html_content = (
+                '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f8fafc;padding:24px;color:#0f172a;">'
+                '<div style="max-width:540px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 12px rgba(0,0,0,0.06);">'
+                '<h2 style="color:#0f766e;margin-top:0;">I-HUB — Réinitialisation de mot de passe</h2>'
+                '<p>Bonjour,</p>'
+                '<p>Vous avez demandé la réinitialisation de votre mot de passe I-HUB. Voici votre code sécurisé à 6 chiffres (valable 15 minutes) :</p>'
+                '<div style="background:#f0fdfa;border:2px dashed #0f766e;border-radius:12px;padding:20px;text-align:center;margin:24px 0;">'
+                f'<span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#0f766e;font-family:monospace;">{escape(str(code))}</span>'
+                '</div>'
+                '<div style="text-align:center;margin:24px 0;">'
+                f'<a href="{escape(str(reset_url), quote=True)}" style="display:inline-block;background:#0f766e;color:#fff;text-decoration:none;font-weight:bold;padding:12px 28px;border-radius:8px;">Réinitialiser mon mot de passe</a>'
+                '</div>'
+                '<p style="font-size:12px;color:#64748b;">Si vous n\'êtes pas à l\'origine de cette demande, vous pouvez ignorer cet e-mail.</p>'
+                '<hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">'
+                '<p style="font-size:11px;color:#94a3b8;text-align:center;">&copy; 2026 I-HUB — Plateforme Médicale Hospitalière</p>'
+                '</div></body></html>'
+            )
+
+        print(f"[AUTH] Code de réinitialisation pour {_mask_email(to_email)}: {code}")
 
         if not api_key:
-            return {"success": True, "notice": "Code journalisé"}
+            print(f"[WARN] EMAIL_CRAFT_API_KEY non configurée pour {_mask_email(to_email)}")
+            return {"success": False, "notice": "Clé API absente"}
 
         payload = {
             "to": to_email,
             "subject": subject,
             "text": text_content,
-            "html": html_content,
             "from_name": "I-HUB"
         }
+        if html_content:
+            payload["html"] = html_content
+
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         try:
             resp = requests.post(email_craft_url, json=payload, headers=headers, timeout=10)
-            return {"success": resp.status_code in (200, 201, 202)}
+            is_ok = resp.status_code in (200, 201, 202)
+            if is_ok:
+                print(f"[AUTH] Envoi Email Craft réussi pour {_mask_email(to_email)} (HTTP {resp.status_code})")
+                return {"success": True, "status_code": resp.status_code}
+            else:
+                err_msg = resp.text[:200]
+                print(f"[ERROR] Email Craft HTTP {resp.status_code} pour {_mask_email(to_email)}: {err_msg}")
+                return {"success": False, "status_code": resp.status_code, "error": err_msg}
         except Exception as e:
-            print(f"[AUTH] Erreur envoi email: {e}")
+            print(f"[ERROR] Exception Email Craft pour {_mask_email(to_email)}: {e}")
             return {"success": False, "error": str(e)}
 
     @auth.post("/api/auth/forgot-password")
@@ -182,9 +217,17 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
         if _is_rate_limited(rate_key, max_requests=3, window_seconds=900):
             return jsonify({"error": "Trop de tentatives de réinitialisation. Veuillez patienter 15 minutes."}), 429
 
-        # Vérifier si l'utilisateur existe
-        res = supabase.table(tables["users"]).select("id, name, email").eq("email", email).execute()
-        user = res.data[0] if res.data else None
+        # Vérifier si l'utilisateur existe (insensible à la casse)
+        user = None
+        try:
+            res = supabase.table(tables["users"]).select("id, name, email").ilike("email", email).execute()
+            user = res.data[0] if res.data else None
+        except Exception:
+            try:
+                res = supabase.table(tables["users"]).select("id, name, email").eq("email", email).execute()
+                user = res.data[0] if res.data else None
+            except Exception as e:
+                print(f"[ERROR] Recherche utilisateur pour reset: {e}")
 
         if user:
             # Générer code 6 chiffres
@@ -196,8 +239,8 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
             }
             app_frontend_url = os.getenv("APP_FRONTEND_URL", "https://okito2shop.web.app").rstrip("/")
             reset_url = f"{app_frontend_url}/index.html?reset_email={email}&reset_code={code}#/reset-password"
-            _send_reset_email(email, code, reset_url)
-            add_audit("REQUEST_PASSWORD_RESET", "user", f"Demande réinitialisation mot de passe: {email}", user["id"])
+            mail_res = _send_reset_email(email, code, reset_url)
+            add_audit("REQUEST_PASSWORD_RESET", "user", f"Demande réinitialisation mot de passe: {email} (envoi: {'OK' if mail_res.get('success') else 'ECHEC'})", user["id"])
 
         # Toujours répondre avec succès générique pour ne pas divulguer si l'email existe
         return jsonify({
