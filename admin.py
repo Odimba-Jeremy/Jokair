@@ -179,6 +179,28 @@ def register_admin_routes(app, *, runtime):
         result = query.order("created_at", desc=True).limit(min(limit, 1000)).execute()
         return jsonify(result.data)
 
-    # ==================== HEALTH ====================
+    # ==================== SETTINGS (REGISTRATION LOCK) ====================
+    @app.route("/api/settings/registrations", methods=["GET"])
+    def get_registration_settings():
+        enabled_fn = app.config.get("IS_REGISTRATION_ENABLED_FN")
+        enabled = enabled_fn() if enabled_fn else True
+        return jsonify({"enabled": enabled})
+
+    @app.route("/api/settings/registrations", methods=["PATCH", "PUT"])
+    @roles_required("super_admin", "admin")
+    def update_registration_settings():
+        data = fast_json()
+        enabled = bool(data.get("enabled", True))
+        
+        # Mettre à jour l'état dans l'application backend
+        if "set_registration_allowed" in globals():
+            set_registration_allowed(enabled)
+        else:
+            app.config["REGISTRATIONS_ENABLED"] = enabled
+        
+        action_str = "activées" if enabled else "bloquées"
+        add_audit("UPDATE", "settings", f"Inscriptions publiques {action_str} par l'administrateur")
+        invalidate_cache()
+        return jsonify({"enabled": enabled, "message": f"Inscriptions {action_str}"})
 
     app.register_blueprint(admin)

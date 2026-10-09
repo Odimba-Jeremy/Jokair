@@ -562,6 +562,33 @@ def get_room_beds(room_id: str):
 
     return jsonify(beds)
 
+@app.route("/api/rooms/<room_id>", methods=["PATCH", "PUT"])
+@token_required
+@roles_required("super_admin", "admin")
+def update_room_tariff(room_id: str):
+    data = fast_json()
+    daily_rate = data.get("daily_rate")
+    if daily_rate is None:
+        return jsonify({"error": "daily_rate requis"}), 422
+    
+    rate_val = to_float(daily_rate, 0.0)
+    update_data = {"daily_rate": rate_val, "updated_at": now_iso()}
+    if "label" in data:
+        update_data["label"] = str(data["label"]).strip()
+    if "room_type" in data:
+        update_data["room_type"] = str(data["room_type"]).strip()
+    if "total_beds" in data:
+        update_data["total_beds"] = to_int(data["total_beds"], 1)
+
+    try:
+        res = supabase.table("hospital_rooms").update(update_data).eq("id", to_int(room_id)).execute()
+        add_audit("UPDATE", "room_tariff", f"Tarif chambre #{room_id} mis à jour : {rate_val}$", to_int(room_id))
+        invalidate_cache()
+        return jsonify(res.data[0] if res.data else {"id": room_id, "daily_rate": rate_val})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 
 
 # ==================== UTILITAIRES ====================
@@ -1970,12 +1997,46 @@ except ImportError:
 
 
 
+# ==================== REGISTRATION CONTROL (BACKEND SECURITY) ====================
+APP_SETTINGS_CACHE = {
+    "registrations_enabled": True
+}
+
+def is_registration_allowed() -> bool:
+    try:
+        res = supabase.table("hospital_settings").select("value").eq("key", "registrations_enabled").execute()
+        if res and res.data:
+            val = res.data[0].get("value")
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.lower() in ("true", "1", "yes", "enabled")
+            if isinstance(val, dict):
+                return bool(val.get("enabled", True))
+    except Exception:
+        pass
+    return APP_SETTINGS_CACHE.get("registrations_enabled", True)
+
+def set_registration_allowed(enabled: bool):
+    enabled = bool(enabled)
+    APP_SETTINGS_CACHE["registrations_enabled"] = enabled
+    try:
+        res = supabase.table("hospital_settings").update({"value": enabled, "updated_at": now_iso()}).eq("key", "registrations_enabled").execute()
+        if not res or not res.data:
+            compatible_insert("hospital_settings", {
+                "key": "registrations_enabled",
+                "value": enabled,
+                "created_at": now_iso(),
+                "updated_at": now_iso()
+            })
+    except Exception as e:
+        print(f"Warning setting hospital_settings: {e}")
+
+app.config["IS_REGISTRATION_ENABLED_FN"] = is_registration_allowed
+
 register_auth_routes(app, fast_json=fast_json, supabase=supabase, tables=TABLES,
-
                      roles=ROLES, now_iso=now_iso, create_token=create_token,
-
                      token_required=token_required, add_audit=add_audit,
-
                      invalidate_cache=invalidate_cache)
 
 register_patient_routes(app, supabase=supabase, tables=TABLES, roles=ROLES,
