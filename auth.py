@@ -3,7 +3,7 @@
 Le module ne possède pas de client Supabase global : l'application lui injecte
 ses dépendances au démarrage. Cela évite les imports circulaires avec app.py.
 """
-from flask import Blueprint, jsonify, g
+from flask import Blueprint, jsonify, request, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
@@ -133,25 +133,17 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
             f"Cordialement,\n"
             f"L'équipe I-HUB"
         )
-        html_content = f"""
-        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;margin:0 auto;padding:24px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;">
-            <div style="text-align:center;margin-bottom:20px;">
-                <h2 style="color:#0a5c7e;margin:0;font-size:22px;">I-HUB Hopital</h2>
-                <p style="color:#64748b;font-size:13px;margin:4px 0 0;">Réinitialisation de mot de passe</p>
-            </div>
-            <p style="font-size:14px;color:#334155;line-height:1.6;">Bonjour,</p>
-            <p style="font-size:14px;color:#334155;line-height:1.6;">Vous avez demandé la réinitialisation de votre mot de passe. Voici votre code de vérification :</p>
-            <div style="text-align:center;margin:24px 0;">
-                <span style="font-size:32px;font-weight:800;letter-spacing:6px;color:#0a5c7e;background:#f0fdfa;padding:12px 24px;border-radius:8px;border:1px dashed #0d9488;display:inline-block;">{code}</span>
-            </div>
-            <p style="font-size:13px;color:#64748b;text-align:center;">Ce code est valable pendant <strong>15 minutes</strong>.</p>
-            <div style="text-align:center;margin:24px 0;">
-                <a href="{reset_url}" style="background:#0a5c7e;color:#ffffff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;">Réinitialiser mon mot de passe</a>
-            </div>
-            <hr style="border:none;border-top:1px solid #f1f5f9;margin:24px 0;">
-            <p style="font-size:12px;color:#94a3b8;line-height:1.5;">Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail en toute sécurité. Votre mot de passe actuel ne sera pas modifié.</p>
-        </div>
-        """
+        template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reset_password_email.html")
+        html_content = None
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+                html_content = html_content.replace("{{code}}", str(code))
+                html_content = html_content.replace("{{reset_url}}", str(reset_url))
+                html_content = html_content.replace("{{to_email}}", str(to_email))
+                html_content = html_content.replace("{{year}}", "2026")
+        except Exception as e:
+            print(f"[AUTH] Modèle e-mail introuvable ({template_path}): {e}")
 
         # Log de secours pour le développement
         print(f"[AUTH] Code de réinitialisation pour {to_email}: {code}")
