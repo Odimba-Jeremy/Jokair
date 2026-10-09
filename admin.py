@@ -155,10 +155,15 @@ def register_admin_routes(app, *, runtime):
     def delete_user(user_id: int):
         if user_id == g.current_user.get("id"):
             return jsonify({"error": "Vous ne pouvez pas supprimer votre propre compte"}), 422
-        supabase.table(TABLES["users"]).delete().eq("id", user_id).execute()
-        add_audit("DELETE", "user", f"Compte #{user_id} supprimé", user_id)
+        try:
+            supabase.table(TABLES["users"]).delete().eq("id", user_id).execute()
+            add_audit("DELETE", "user", f"Compte #{user_id} supprimé", user_id)
+        except Exception:
+            # Si le compte est lié à des actes médicaux ou financiers (contrainte FK), on le désactive pour préserver l'historique
+            supabase.table(TABLES["users"]).update({"is_active": False, "updated_at": now_iso()}).eq("id", user_id).execute()
+            add_audit("DEACTIVATE", "user", f"Compte #{user_id} désactivé (lié à des actes existants)", user_id)
         invalidate_cache()
-        return jsonify({"message": "Compte supprimé"})
+        return jsonify({"message": "Compte supprimé ou désactivé"})
 
     # ==================== AUDIT ====================
     @app.route("/api/audit", methods=["GET"])
