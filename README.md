@@ -1,213 +1,42 @@
-# 🏥 I-HUB — Backend API
+# Backend Dedikka
 
-> Système de gestion hospitalière · Backend Flask · Déployé sur Render
+Monolithe modulaire Python : **tout le code source du backend est directement dans ce dossier**, sans sous-dossier. Chaque fichier est un module métier ou technique : `main.py`, `accounts.py`, `database.py`, `config.py`.
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
-![Flask](https://img.shields.io/badge/Flask-3.x-black?logo=flask)
-![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-green?logo=supabase)
-![Render](https://img.shields.io/badge/Deployed%20on-Render-46E3B7?logo=render)
-![License](https://img.shields.io/badge/License-Private-red)
+## Démarrage local
 
----
+Depuis `backend/` :
 
-## 📋 Description
-
-**I-HUB** est un système complet de gestion hospitalière conçu pour les hôpitaux en République Démocratique du Congo.  
-Le backend expose une **API REST** consommée par le frontend JavaScript pur (aucun framework).
-
-### Fonctionnalités principales
-- 👤 Gestion des patients (admission, dossier médical, hospitalisations)
-- 🩺 Consultations, soins infirmiers, prescriptions
-- 💊 Pharmacie — délivrance et suivi des médicaments
-- 🧪 Laboratoire — résultats d'analyses
-- 🏥 Maternité & Pédiatrie
-- 💰 Facturation bidevise (USD / Franc Congolais)
-- 📊 Statistiques et rapports financiers en temps réel
-- 🔐 Authentification multi-rôles (Admin, Médecin, Infirmier, Réception, Pharmacie, Labo)
-
----
-
-## 🛠️ Stack Technique
-
-| Couche | Technologie |
-|--------|-------------|
-| Framework | **Python Flask** |
-| Base de données | **Supabase (PostgreSQL)** |
-| Authentification | **Supabase Auth + JWT** |
-| Déploiement | **Render** (Web Service) |
-| Devise de référence | **USD** (taux FC dynamique depuis la DB) |
-
----
-
-## 📁 Structure des Fichiers
-
-```
-backend/
-├── app.py              # Point d'entrée principal — initialisation, helpers, routes de base
-├── auth.py             # Authentification, gestion des sessions et des rôles
-├── patients.py         # CRUD patients, dossiers médicaux, hospitalisations
-├── medical.py          # Soins infirmiers, prescriptions médicales, actes
-├── workflow.py         # Workflows : consultations, admissions, lignes de compte
-├── billing_api.py      # Facturation, paiements bidevises, statistiques financières
-├── pharmacy.py         # Délivrance médicaments, stock pharmacie
-├── laboratory.py       # Résultats d'analyses, demandes labo
-├── reports.py          # Rapports, taux de change, exports
-├── admin.py            # Administration système, utilisateurs, configuration
-├── doctor.py           # Interface médecin — consultations, ordonnances
-├── maternity.py        # Gestion maternité
-├── pediatrics.py       # Gestion pédiatrie
-├── patient_portal.py   # Portail patient
-├── events.py           # Événements temps réel (SSE)
-├── ai.py               # Fonctionnalités IA (assistant clinique)
-└── test.py             # Scripts de test
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -m pip install -e .
+Copy-Item .env.example .env
+py -m uvicorn main:app --reload --port 8001
 ```
 
----
+Avec le site ouvert sur `127.0.0.1:8000`, l’API écoute sur `http://127.0.0.1:8001`. Vérifier `GET /api/v1/health` ou ouvrir `/docs`.
 
-## ⚙️ Variables d'Environnement
+En développement, SQLite crée les tables `users` et `user_sessions` au démarrage. Pour la production, configurer `DATABASE_URL` avec PostgreSQL, appliquer des migrations et activer HTTPS avec `COOKIE_SECURE=true`.
 
-Créez un fichier `.env` à la racine du dossier `backend/` (ou configurez-les dans Render) :
+## Authentification
 
-```env
-# Supabase
-SUPABASE_URL=https://xxxxxxxxxxxxxxxx.supabase.co
-SUPABASE_KEY=your_supabase_service_role_key
+- `GET /api/v1/auth/csrf` émet un jeton CSRF.
+- `POST /api/v1/auth/register` crée un compte et ouvre une session.
+- `POST /api/v1/auth/login` vérifie les identifiants et ouvre une session.
+- `GET /api/v1/auth/me` renvoie le compte connecté.
+- `POST /api/v1/auth/logout` révoque la session.
 
-# Flask
-FLASK_SECRET_KEY=your_secret_key_here
-FLASK_ENV=production
+Les sessions sont conservées côté serveur ; le cookie de session est `HttpOnly` et seul son condensat est stocké en base. Les mots de passe sont hachés.
 
-# (Optionnel) Port local
-PORT=5000
-```
+## Première publication de dédicace
 
-> ⚠️ **Ne jamais committer le fichier `.env`** — il est dans `.gitignore`.
+- `POST /api/v1/uploads/images` envoie une image authentifiée au bucket `dedikka-images`.
+- `POST /api/v1/pages` sauvegarde la dédicace et renvoie son URL publique.
+- `GET /p/{slug}` affiche la page publiée.
+- `POST /api/v1/pages/preview` produit l’aperçu de la page Dedicate.
 
----
+Ajoute `SUPABASE_URL`, `SUPABASE_SECRET_KEY` et `SUPABASE_BUCKET` à l’environnement du backend. La clé secrète reste côté serveur. Exécute `schema.sql` dans le SQL Editor Supabase avant un déploiement en production.
 
-## 🚀 Déploiement sur Render
+## Render
 
-### 1. Prérequis
-- Compte [Render](https://render.com)
-- Dépôt GitHub connecté à Render
-
-### 2. Configuration du Web Service
-| Champ | Valeur |
-|-------|--------|
-| **Environment** | Python 3 |
-| **Build Command** | `pip install -r requirements.txt` |
-| **Start Command** | `gunicorn app:app` |
-| **Root Directory** | `backend` |
-
-### 3. Variables d'environnement
-Ajouter `SUPABASE_URL`, `SUPABASE_KEY`, et `FLASK_SECRET_KEY` dans **Environment → Add Environment Variable** sur Render.
-
-### 4. Déploiement automatique
-Chaque `git push` sur la branche `main` déclenche un redéploiement automatique.
-
----
-
-## 📡 Routes API Principales
-
-### 🔐 Authentification
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `POST` | `/api/auth/login` | Connexion utilisateur |
-| `POST` | `/api/auth/logout` | Déconnexion |
-| `GET` | `/api/auth/me` | Profil utilisateur courant |
-
-### 👤 Patients
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `GET` | `/api/patients` | Liste des patients |
-| `POST` | `/api/patients` | Créer un patient |
-| `GET` | `/api/patients/<id>` | Détail d'un patient |
-| `PATCH` | `/api/patients/<id>` | Mettre à jour un patient |
-
-### 💰 Facturation & Paiements
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `GET` | `/api/billing/stats` | Statistiques financières du jour |
-| `GET` | `/api/billing/account/<patient_id>` | Compte patient (solde, lignes, transactions) |
-| `POST` | `/api/billing/pay/<patient_id>` | Enregistrer un paiement (USD ou FC) |
-| `GET` | `/api/exchange-rate` | Taux de change USD/FC actif |
-
-### 💊 Pharmacie
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `GET` | `/api/pharmacy/stock` | Stock disponible |
-| `POST` | `/api/pharmacy/deliver` | Délivrer un médicament |
-
-### 🧪 Laboratoire
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `GET` | `/api/laboratory/requests` | Demandes d'analyses |
-| `POST` | `/api/laboratory/results` | Enregistrer des résultats |
-
-### 📊 Rapports
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| `GET` | `/api/reports/daily` | Rapport journalier |
-| `GET` | `/api/reports/patients` | Statistiques patients |
-
----
-
-## 💱 Règles Métier — Facturation
-
-### Devise de référence
-- Toutes les transactions sont stockées en **USD**.
-- Le taux USD/FC est lu **dynamiquement** depuis la table `exchange_rates` en base de données.
-- **Aucun taux n'est codé en dur** dans le code source.
-
-### Compte patient
-- Le solde d'un patient = `Σ(lignes de compte)` − `Σ(paiements)`
-- Les **factures** sont des documents d'impression uniquement — elles ne créent pas de dette.
-- Un paiement ne peut pas dépasser le solde dû (anti-surpaiement).
-
-### Idempotence
-- Chaque acte et paiement porte une clé unique encodée dans le champ `description` : `[idemp:KEY]`
-- Les doublons (double-clic, double-soumission réseau) sont détectés et ignorés.
-
----
-
-## 🏃 Démarrage Local
-
-```bash
-# 1. Cloner le dépôt
-git clone https://github.com/votre-username/i-hub-backend.git
-cd i-hub-backend/backend
-
-# 2. Créer un environnement virtuel
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # Linux/Mac
-
-# 3. Installer les dépendances
-pip install -r requirements.txt
-
-# 4. Configurer les variables d'environnement
-cp .env.example .env
-# Éditer .env avec vos clés Supabase
-
-# 5. Lancer le serveur
-python app.py
-# ou avec gunicorn :
-gunicorn app:app --reload
-```
-
-Le serveur démarre sur `http://localhost:5000`.
-
----
-
-## 🔒 Sécurité
-
-- Toutes les routes sensibles sont protégées par **JWT Supabase**.
-- Les rôles sont vérifiés à chaque requête (Admin, Médecin, Infirmier, Réception, Pharmacie, Labo).
-- Les clés Supabase sont stockées exclusivement dans les variables d'environnement.
-
----
-
-## 📞 Contact
-
-Projet **I-HUB** — Système de gestion hospitalière  
-Développé pour les établissements de santé en RDC 🇨🇩
+Le fichier `../render.yaml` démarre Gunicorn sur le point d’entrée ASGI `main:app`, avec le worker Uvicorn. Dans Render, renseigne les variables marquées `sync: false` : `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PUBLIC_BACKEND_URL` et `FRONTEND_ORIGINS`.
