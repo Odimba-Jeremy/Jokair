@@ -236,6 +236,7 @@ def register_billing_routes(app, *, runtime):
             return jsonify({"error": "Categorie, libelle et montant requis"}), 422
         payload = {
             "code": code, "category": category, "label": label, "amount": amount,
+            "price_usd": amount, "price": amount,
             "is_active": data.get("is_active", True),
             "created_by": g.current_user["id"], "created_by_name": g.current_user["name"],
             "created_at": now_iso(), "updated_at": now_iso()
@@ -292,6 +293,8 @@ def register_billing_routes(app, *, runtime):
             "category": normalize_tariff_category(str(data.get("category", current.get("category") or "")).strip()),
             "label": str(data.get("label", current.get("label") or "")).strip(),
             "amount": amount,
+            "price_usd": amount,
+            "price": amount,
             "is_active": data.get("is_active", current.get("is_active", True)),
             "updated_at": now_iso()
         }
@@ -1545,32 +1548,23 @@ def register_billing_routes(app, *, runtime):
 
 
 
-        # Filtrage du cycle actif : si de nouvelles prestations sont ajoutées après un paiement/facturation,
-        # le compte patient actif ne doit pas réafficher les anciennes prestations déjà facturées/soldées.
-        pending_lines = [l for l in lines if str(l.get("status") or "").lower() not in ("invoiced", "cancelled")]
-        has_new_activity = len(pending_lines) > 0
-
-        # Si le compte a de nouvelles prestations en attente, le cycle actif correspond à ces prestations
-        display_lines = pending_lines if has_new_activity else lines
-
         total_facture = round(sum(
             to_float(l.get("amount"), 0)
-            for l in display_lines if str(l.get("status") or "").lower() != "cancelled"
+            for l in lines if str(l.get("status") or "").lower() != "cancelled"
         ), 2)
 
         total_paid_real = 0.0
-        if not has_new_activity:
-            for tx in transactions:
-                amt = to_float(tx.get("amount"), 0)
-                if str(tx.get("type", "")).lower() == "credit" or amt < 0:
-                    total_paid_real += abs(amt)
-            total_paid_real = round(total_paid_real, 2)
+        for tx in transactions:
+            amt = to_float(tx.get("amount"), 0)
+            if str(tx.get("type", "")).lower() == "credit" or amt < 0:
+                total_paid_real += abs(amt)
+        total_paid_real = round(total_paid_real, 2)
 
         solde_restant = round(max(0.0, total_facture - total_paid_real), 2)
 
         # Normalisation pour l'affichage de l'interface (badges de statut et libellé de service)
         normalized_lines = []
-        for l in display_lines:
+        for l in lines:
             line_copy = dict(l)
             db_status = str(line_copy.get("status") or "pending").lower()
             line_copy["status"] = "PAID" if db_status == "invoiced" else "PENDING"
@@ -1580,7 +1574,7 @@ def register_billing_routes(app, *, runtime):
 
         # Normalisation des montants de transactions (valeur absolue positive pour l'affichage)
         normalized_payments = []
-        for tx in (transactions if not has_new_activity else []):
+        for tx in transactions:
             tx_copy = dict(tx)
             raw_amt = to_float(tx_copy.get("amount"), 0)
             tx_copy["amount"] = abs(raw_amt)
@@ -1597,6 +1591,31 @@ def register_billing_routes(app, *, runtime):
         account["balance"] = solde_restant
         account["all_lines_count"] = len(lines)
         return jsonify(account)
+
+    @billing.route("/api/billing/accounts/<int:patient_id>/lines", methods=["POST"])
+    @roles_required("super_admin", "reception")
+    def add_billing_account_line(patient_id: int):
+        data = fast_json()
+        description = str(data.get("description", "")).strip()
+        amount = round(to_float(data.get("amount"), 0), 2)
+        category = str(data.get("category", "soins")).strip()
+        quantity = max(1, to_int(data.get("quantity"), 1))
+        if not description or amount <= 0:
+            return jsonify({"error": "Description et montant (> 0) requis"}), 422
+        
+        line = add_patient_account_line(
+            patient_id=patient_id,
+            category=category,
+            description=description,
+            amount=amount * quantity,
+            source="manual",
+            source_id=None,
+            quantity=quantity,
+            unit_price=amount
+        )
+        add_audit("CREATE", "patient_account_line", f"Prestation ajoutée patient #{patient_id}: {description} = {amount * quantity}$", patient_id)
+        invalidate_cache()
+        return jsonify(line or {"message": "Prestation ajoutée avec succès", "amount": amount * quantity}), 201
 
 
 

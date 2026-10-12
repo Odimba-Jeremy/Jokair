@@ -12,6 +12,8 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
                          invalidate_cache):
     auth = Blueprint("auth", __name__)
 
+    _login_rate_limits = {}
+
     @auth.post("/api/auth/login")
     def login():
         data = fast_json()
@@ -19,16 +21,41 @@ def register_auth_routes(app, *, fast_json, supabase, tables, roles, now_iso,
         password = data.get("password", "")
         if not email or not password:
             return jsonify({"error": "Email et mot de passe requis"}), 422
+
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+        rate_key = f"{client_ip}:{email}"
+        now = time.time()
+        # Rate limit anti-bruteforce: max 5 échecs en 5 minutes
+        attempts = [t for t in _login_rate_limits.get(rate_key, []) if now - t < 300]
+        if len(attempts) >= 5:
+            _login_rate_limits[rate_key] = attempts
+            return jsonify({"error": "Trop de tentatives de connexion échouées. Accès temporairement suspendu pour 5 minutes."}), 429
+
         result = supabase.table(tables["users"]).select("*").eq("email", email).execute()
         user = result.data[0] if result.data else None
+
+        if user and user.get("is_active") is False:
+            return jsonify({"error": "Ce compte utilisateur a été désactivé par l'administration."}), 403
+
         try:
             password_valid = bool(user) and check_password_hash(user.get("password_hash", ""), password)
         except (ValueError, TypeError):
             # Un hash mal enregistré ne doit jamais faire tomber l'endpoint
             # de connexion. L'administrateur doit le corriger en base.
             password_valid = False
+
         if not password_valid:
-            return jsonify({"error": "Email ou mot de passe incorrect"}), 401
+            attempts.append(now)
+            _login_rate_limits[rate_key] = attempts
+            remaining = max(0, 5 - len(attempts))
+            err_msg = "Email ou mot de passe incorrect"
+            if remaining <= 2:
+                err_msg += f" ({remaining} essai(s) restant(s) avant suspension de 5 min)"
+            return jsonify({"error": err_msg}), 401
+
+        # Connexion réussie -> réinitialiser les échecs
+        _login_rate_limits.pop(rate_key, None)
+
         token = create_token(user)
         # Mettre à jour last_login
         try:

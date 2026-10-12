@@ -119,11 +119,11 @@ else:
 
 # ==================== CONFIGURATION ====================
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://figmeixteescztmmprmi.supabase.co")
 
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY", "ihub-secret-key-change-me")
 
 HOST = "0.0.0.0"
 
@@ -2012,10 +2012,10 @@ def is_registration_allowed() -> bool:
             if isinstance(val, str):
                 return val.lower() in ("true", "1", "yes", "enabled")
             if isinstance(val, dict):
-                return bool(val.get("enabled", True))
+                return bool(val.get("enabled", False))
     except Exception:
         pass
-    return APP_SETTINGS_CACHE.get("registrations_enabled", True)
+    return APP_SETTINGS_CACHE.get("registrations_enabled", False)
 
 def set_registration_allowed(enabled: bool):
     enabled = bool(enabled)

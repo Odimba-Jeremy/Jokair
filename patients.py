@@ -156,15 +156,6 @@ def register_patient_routes(
         result = supabase.table(tables["patients"]).select("*").eq("id", patient_id).execute()
         if not result.data:
             return jsonify({"error": "Patient introuvable"}), 404
-        if updates.get("status") == "discharged":
-            try:
-                supabase.table("hospitalizations").update({
-                    "status": "discharged",
-                    "discharge_date": now_iso(),
-                    "updated_at": now_iso()
-                }).eq("patient_id", patient_id).in_("status", ["admitted", "hospitalized", "active"]).execute()
-            except Exception:
-                pass
         patient = enrich_patient_identifier(add_pregnancy_flags(result.data)[0])
         if not can_access_patient_record(patient):
             return jsonify({"error": "Acces patient non autorise"}), 403
@@ -215,6 +206,15 @@ def register_patient_routes(
         result = supabase.table(tables["patients"]).update(updates).eq("id", patient_id).execute()
         if not result.data:
             return jsonify({"error": "Patient introuvable"}), 404
+        if updates.get("status") == "discharged":
+            try:
+                supabase.table("hospitalizations").update({
+                    "status": "discharged",
+                    "discharge_date": now_iso(),
+                    "updated_at": now_iso()
+                }).eq("patient_id", patient_id).in_("status", ["admitted", "hospitalized", "active"]).execute()
+            except Exception:
+                pass
         changed_fields = ", ".join(k for k in updates.keys() if k != "updated_at")
         add_audit("UPDATE", "patient", f"Patient #{patient_id} modifié — champs: {changed_fields}", patient_id)
         invalidate_cache()
@@ -427,9 +427,22 @@ def register_patient_routes(
             return jsonify({"error": "Patient introuvable"}), code
         return jsonify(data)
 
+    _public_record_rate_limits = {}
+
     @patients.route("/api/patients/<int:patient_id>/public-record", methods=["GET"])
     def get_public_patient_record(patient_id: int):
-        """Accès public sécurisé pour le scan QR Code de la fiche patient sans authentification."""
+        """Accès public sécurisé pour le scan QR Code de la fiche patient avec protection anti-scraping."""
+        import time
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+        now = time.time()
+        # Rate limiting anti-scraping : max 20 requêtes par minute par IP
+        attempts = [t for t in _public_record_rate_limits.get(client_ip, []) if now - t < 60]
+        if len(attempts) >= 20:
+            _public_record_rate_limits[client_ip] = attempts
+            return jsonify({"error": "Trop de requêtes de consultation. Veuillez patienter une minute."}), 429
+        attempts.append(now)
+        _public_record_rate_limits[client_ip] = attempts
+
         data, code = _fetch_complete_patient_record(patient_id)
         if not data:
             return jsonify({"error": "Patient introuvable"}), code
